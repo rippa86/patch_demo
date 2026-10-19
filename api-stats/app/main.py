@@ -12,9 +12,9 @@ app = FastAPI(title="webstore-api-stats")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://second-demo.lab.rippa.io",
-        "http://10.10.4.110",
-        "http://second-demo.lab.rippa.io:80",
+        "http://demo-vm.lab.rippa.io",
+        "http://10.10.4.108",
+        "http://demo-vm.lab.rippa.io:80",
     ],
     allow_methods=["GET"],
     allow_headers=["*"],

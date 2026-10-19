@@ -2,4 +2,4 @@ FROM mariadb:11.4.5
 USER 0
 EXPOSE 4567
 ENTRYPOINT ["garbd"]
-CMD ["-n", "garbd-second-demo", "-g", "webstore", "-a", "gcomm://webapp01.lab.rippa.io:4567,webapp02.lab.rippa.io:4567"]
+CMD ["-n", "garbd-demo-vm", "-g", "webstore", "-a", "gcomm://10.10.4.115:4567,10.10.4.116:4567"]

@@ -1,9 +1,9 @@
 # Bootstrap — lab.rippa.io webstore
 
-Resolved later at deploy time from Ansible facts (this workstation could not
-look up webapp01/webapp02). Allocated VIP: **10.10.4.50** for
-`shoppingapp.lab.rippa.io`. Quorum host is `second-demo.lab.rippa.io` /
-`10.10.4.110`.
+Lab addressing: **web-frontend1.lab.rippa.io** / **10.10.4.115**,
+**web-frontend2.lab.rippa.io** / **10.10.4.116**, VIP **10.10.4.50** for
+`shoppingapp.lab.rippa.io`. Quorum host is `demo-vm.lab.rippa.io` /
+`10.10.4.108`.
 
 ## 0. DNS / hosts
 
@@ -24,7 +24,7 @@ sudo vi /etc/webstore/webstore.env
 ```
 
 Use the **same** `JWT_SECRET`, `INTERNAL_TOKEN`, `MARIADB_*`, `LDAP_*`,
-`SYNTH_PASSWORD` on webapp01 and webapp02. Keep `DATABASE_URL` password in
+`SYNTH_PASSWORD` on web-frontend1 and web-frontend2. Keep `DATABASE_URL` password in
 sync with `MARIADB_PASSWORD`.
 
 ## 2. Ansible deploy (images, quadlets, keepalived, IPs)
@@ -36,8 +36,8 @@ cp inventory.ini.example inventory.ini
 ansible-playbook playbooks/deploy.yml
 ```
 
-That playbook prints the live `webapp01` / `webapp02` addresses. It does not
-invent last octets. It writes `/etc/hosts` for the lab FQDNs.
+That playbook writes `/etc/hosts` for the lab FQDNs and fills Galera/keepalived
+peer addresses from inventory (`10.10.4.115` / `10.10.4.116`).
 
 Apply firewalld from `deploy/firewalld/README.md`.
 
@@ -56,7 +56,7 @@ sudo ldappasswd -x -H ldap://localhost -D "cn=Directory Manager" -w "$LDAP_MANAG
   -s "$LDAP_API_PASSWORD" "uid=api,ou=Services,dc=webstore,dc=local"
 ```
 
-Then MMR: follow `deploy/ldap/mmr.md` (replica-id 1 on webapp01, 2 on webapp02).
+Then MMR: follow `deploy/ldap/mmr.md` (replica-id 1 on web-frontend1, 2 on web-frontend2).
 
 ```bash
 sudo dsconf webstore config replace nsslapd-listenhost=0.0.0.0
@@ -65,7 +65,7 @@ sudo systemctl enable --now dirsrv@webstore
 
 ## 4. Galera
 
-Bootstrap **webapp01 only** (empty `gcomm://`), then join webapp02 and garbd:
+Bootstrap **web-frontend1 only** (empty `gcomm://`), then join web-frontend2 and garbd:
 
 ```bash
 ansible-playbook playbooks/galera-bootstrap.yml
@@ -92,7 +92,7 @@ sudo systemctl enable --now \
   keepalived.service
 ```
 
-On **second-demo**:
+On **demo-vm**:
 
 ```bash
 sudo systemctl enable --now webstore-httpd-dash.service
@@ -104,13 +104,13 @@ sudo systemctl enable --now webstore-synth-users.service
 
 ```bash
 ansible-playbook playbooks/smoke.yml
-ansible-playbook playbooks/drain.yml -e target=webapp01.lab.rippa.io
+ansible-playbook playbooks/drain.yml -e target=web-frontend1.lab.rippa.io
 ansible-playbook playbooks/smoke.yml
-ansible-playbook playbooks/restore.yml -e target=webapp01.lab.rippa.io
+ansible-playbook playbooks/restore.yml -e target=web-frontend1.lab.rippa.io
 ```
 
 ## URLs
 
 - Shop: http://shoppingapp.lab.rippa.io/
 - Create account: http://shoppingapp.lab.rippa.io/account.html
-- Ops graph: http://second-demo.lab.rippa.io/
+- Ops graph: http://demo-vm.lab.rippa.io/

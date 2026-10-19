@@ -3,16 +3,16 @@
   hosts: webstore_shop
   gather_facts: true
 
-- name: Bootstrap Galera on webapp01
-  hosts: webapp01.lab.rippa.io
+- name: Bootstrap Galera on web-frontend1
+  hosts: web-frontend1.lab.rippa.io
   become: true
   vars:
     galera_bootstrap: true
   tasks:
     - name: Peer addresses from facts
       ansible.builtin.set_fact:
-        webapp01_ip: "{{ hostvars['webapp01.lab.rippa.io'].ansible_default_ipv4.address }}"
-        webapp02_ip: "{{ hostvars['webapp02.lab.rippa.io'].ansible_default_ipv4.address }}"
+        frontend1_ip: "{{ hostvars['web-frontend1.lab.rippa.io'].ansible_default_ipv4.address }}"
+        frontend2_ip: "{{ hostvars['web-frontend2.lab.rippa.io'].ansible_default_ipv4.address }}"
     - name: Read MariaDB root password
       ansible.builtin.command: awk -F= '/^MARIADB_ROOT_PASSWORD=/ {print substr($0, index($0,$2))}' /etc/webstore/webstore.env
       register: mariadb_pw

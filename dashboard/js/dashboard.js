@@ -1,6 +1,6 @@
 const ENDPOINTS = [
-  "http://webapp01.lab.rippa.io:8014/api/stats/logged-in",
-  "http://webapp02.lab.rippa.io:8014/api/stats/logged-in",
+  "http://web-frontend1.lab.rippa.io:8014/api/stats/logged-in",
+  "http://web-frontend2.lab.rippa.io:8014/api/stats/logged-in",
 ];
 
 const localSeries = [];

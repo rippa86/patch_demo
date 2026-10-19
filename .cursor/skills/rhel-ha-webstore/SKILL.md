@@ -19,7 +19,7 @@ Implement [docs/HLD.md](../../../docs/HLD.md). Constraints: [architecture.md](ar
 - Two RHEL 10 shop hosts, active-active. Drain one with Ansible; the shop stays up.
 - Separate public APIs — do not merge: `api-account`, `api-login`, `api-logout`, `api-cart`. Plus internal `backend` and `api-stats`.
 - Frontend: create account, login, logout, cart with **exactly three** products. HTML/JS only, httpd, calls those APIs only.
-- LDAP (389-ds) and keepalived on the **shop host**. garbd, dashboard httpd, and **synth-users** on **second-demo.lab.rippa.io**.
+- LDAP (389-ds) and keepalived on the **shop host**. garbd, dashboard httpd, and **synth-users** on **demo-vm.lab.rippa.io**.
 - HAProxy in Podman on shop hosts. VIP via keepalived on A/B, not on ops.
 - Galera = two data nodes + garbd on ops. Sessions live in Galera (JWT has `sid`). No Redis. No sticky sessions.
 - Drain/restore are **Ansible playbooks**, not operator shell scripts.
@@ -63,14 +63,14 @@ Implement [docs/HLD.md](../../../docs/HLD.md). Constraints: [architecture.md](ar
 
 ## Ansible drain / restore
 
-`ansible/playbooks/drain.yml -e target=webapp01.lab.rippa.io`
+`ansible/playbooks/drain.yml -e target=web-frontend1.lab.rippa.io`
 
 1. Move VIP off `target` if needed (keepalived).
 2. Set `target` servers to HAProxy **drain** (no new conns).
 3. Wait until current connections to `target` are 0.
 4. `maint`, then stop APIs, backend, httpd, mariadb (desync first), 389-ds.
 
-`restore.yml` reverses that. Inventory: `webstore_shop` (webapp01.lab.rippa.io, webapp02.lab.rippa.io), `webstore_ops` (second-demo.lab.rippa.io). Client VIP DNS: `shoppingapp.lab.rippa.io`. No `deploy/scripts/webstore-drain.sh`.
+`restore.yml` reverses that. Inventory: `webstore_shop` (web-frontend1.lab.rippa.io, web-frontend2.lab.rippa.io), `webstore_ops` (demo-vm.lab.rippa.io). Client VIP DNS: `shoppingapp.lab.rippa.io`. No `deploy/scripts/webstore-drain.sh`.
 
 ## Quality bar
 
