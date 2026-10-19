@@ -17,13 +17,13 @@ Read [docs/HLD.md](../../../docs/HLD.md). Do not reverse these decisions.
 | api-stats | Podman shop :8014 | Ops only |
 | backend | Podman shop :8001 | Only process that opens SQL |
 | mariadb | Podman shop | Galera, advertise host IP |
-| garbd | **second-demo.lab.rippa.io** | Third vote (`10.10.4.110`) |
-| httpd-dash | **second-demo.lab.rippa.io** | Logged-in graph page |
-| synth-users | **second-demo.lab.rippa.io** | 100 lab users login/out via shoppingapp ~30s |
+| garbd | **demo-vm.lab.rippa.io** | Third vote (`10.10.4.108`) |
+| httpd-dash | **demo-vm.lab.rippa.io** | Logged-in graph page |
+| synth-users | **demo-vm.lab.rippa.io** | 100 lab users login/out via shoppingapp ~30s |
 
 ## HAProxy (shop VIP)
 
-- `/api/account` → `webapp01.lab.rippa.io:8010` and `webapp02.lab.rippa.io:8010`
+- `/api/account` → `web-frontend1.lab.rippa.io:8010` and `web-frontend2.lab.rippa.io:8010`
 - `/api/login` → `*:8011`
 - `/api/logout` → `*:8012`
 - `/api/cart` → `*:8013`
@@ -64,7 +64,7 @@ Must work:
 - Login / logout
 - Cart for **three** named products; checkout
 - Ops page: current logged-in count + line graph over time
-- Ansible drain of webapp01 with connections bled to webapp02
+- Ansible drain of web-frontend1 with connections bled to web-frontend2
 - `synth-users` creates 100 `synthNNN` accounts once, then each user logs in/out on an independent 15–45s timer against the shop VIP
 
 Skip payments, email, CDN.

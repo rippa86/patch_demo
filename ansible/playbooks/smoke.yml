@@ -50,18 +50,18 @@
           Authorization: "Bearer {{ login.json.token }}"
         status_code: 200
 
-    - name: Stats from webapp01
+    - name: Stats from web-frontend1
       ansible.builtin.uri:
-        url: http://webapp01.lab.rippa.io:8014/api/stats/logged-in
+        url: http://web-frontend1.lab.rippa.io:8014/api/stats/logged-in
       register: s1
 
-    - name: Stats from webapp02
+    - name: Stats from web-frontend2
       ansible.builtin.uri:
-        url: http://webapp02.lab.rippa.io:8014/api/stats/logged-in
+        url: http://web-frontend2.lab.rippa.io:8014/api/stats/logged-in
       register: s2
 
     - name: Show logged-in counts
       ansible.builtin.debug:
         msg:
-          - "webapp01 count={{ s1.json.count }}"
-          - "webapp02 count={{ s2.json.count }}"
+          - "web-frontend1 count={{ s1.json.count }}"
+          - "web-frontend2 count={{ s2.json.count }}"

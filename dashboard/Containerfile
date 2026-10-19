@@ -1,7 +1,7 @@
 FROM registry.access.redhat.com/ubi10/ubi:10.0
 RUN dnf -y install httpd && dnf clean all \
     && sed -i 's/^Listen 80$/Listen 8080/' /etc/httpd/conf/httpd.conf \
-    && echo "ServerName second-demo.lab.rippa.io" >> /etc/httpd/conf/httpd.conf \
+    && echo "ServerName demo-vm.lab.rippa.io" >> /etc/httpd/conf/httpd.conf \
     && rm -rf /usr/share/httpd/noindex
 COPY . /var/www/html/
 EXPOSE 8080

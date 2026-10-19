@@ -3,7 +3,7 @@
   hosts: webstore_shop
   gather_facts: true
 
-- name: Point webapp01 at the full gcomm list and start webapp02
+- name: Point web-frontend1 at the full gcomm list and start web-frontend2
   hosts: webstore_shop
   become: true
   vars:
@@ -11,8 +11,8 @@
   tasks:
     - name: Addresses
       ansible.builtin.set_fact:
-        webapp01_ip: "{{ hostvars['webapp01.lab.rippa.io'].ansible_default_ipv4.address }}"
-        webapp02_ip: "{{ hostvars['webapp02.lab.rippa.io'].ansible_default_ipv4.address }}"
+        frontend1_ip: "{{ hostvars['web-frontend1.lab.rippa.io'].ansible_default_ipv4.address }}"
+        frontend2_ip: "{{ hostvars['web-frontend2.lab.rippa.io'].ansible_default_ipv4.address }}"
     - name: Read MariaDB root password
       ansible.builtin.command: awk -F= '/^MARIADB_ROOT_PASSWORD=/ {print substr($0, index($0,$2))}' /etc/webstore/webstore.env
       register: mariadb_pw
@@ -24,12 +24,12 @@
         mode: "0600"
       vars:
         mariadb_root_password: "{{ mariadb_pw.stdout }}"
-    - name: Start MariaDB on webapp02 (joins webapp01)
+    - name: Start MariaDB on web-frontend2 (joins web-frontend1)
       ansible.builtin.systemd:
         name: webstore-mariadb.service
         state: started
         enabled: true
-      when: inventory_hostname == 'webapp02.lab.rippa.io'
+      when: inventory_hostname == 'web-frontend2.lab.rippa.io'
 
 - name: Start garbd on ops
   hosts: webstore_ops

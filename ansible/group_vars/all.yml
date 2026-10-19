@@ -1,6 +1,6 @@
 shop_vip_dns: shoppingapp.lab.rippa.io
 shop_vip_ip: "10.10.4.50"
-galera_garbd_ip: "10.10.4.110"
+galera_garbd_ip: "10.10.4.108"
 keepalived_pass: shopvrrp
 repo_dest: /opt/webstore
 haproxy_socket: /var/run/webstore/haproxy.sock

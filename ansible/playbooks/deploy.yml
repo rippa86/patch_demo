@@ -1,5 +1,5 @@
 ---
-- name: Discover shop IPs (do not invent last octets)
+- name: Discover shop IPs from host facts
   hosts: webstore_shop
   become: true
   gather_facts: true
@@ -8,8 +8,8 @@
       ansible.builtin.set_fact:
         keepalived_interface: "{{ ansible_default_ipv4.interface }}"
         keepalived_peer_ip: "{{ hostvars[peer].ansible_default_ipv4.address }}"
-        webapp01_ip: "{{ hostvars['webapp01.lab.rippa.io'].ansible_default_ipv4.address }}"
-        webapp02_ip: "{{ hostvars['webapp02.lab.rippa.io'].ansible_default_ipv4.address }}"
+        frontend1_ip: "{{ hostvars['web-frontend1.lab.rippa.io'].ansible_default_ipv4.address }}"
+        frontend2_ip: "{{ hostvars['web-frontend2.lab.rippa.io'].ansible_default_ipv4.address }}"
       vars:
         peer: "{{ groups['webstore_shop'] | difference([inventory_hostname]) | first }}"
     - name: Show resolved addressing
@@ -30,10 +30,10 @@
         regexp: "{{ item.re }}"
         line: "{{ item.line }}"
       loop:
-        - { re: "webapp01\\.lab\\.rippa\\.io$", line: "{{ hostvars['webapp01.lab.rippa.io'].ansible_default_ipv4.address }} webapp01.lab.rippa.io" }
-        - { re: "webapp02\\.lab\\.rippa\\.io$", line: "{{ hostvars['webapp02.lab.rippa.io'].ansible_default_ipv4.address }} webapp02.lab.rippa.io" }
+        - { re: "web-frontend1\\.lab\\.rippa\\.io$", line: "{{ hostvars['web-frontend1.lab.rippa.io'].ansible_default_ipv4.address }} web-frontend1.lab.rippa.io" }
+        - { re: "web-frontend2\\.lab\\.rippa\\.io$", line: "{{ hostvars['web-frontend2.lab.rippa.io'].ansible_default_ipv4.address }} web-frontend2.lab.rippa.io" }
         - { re: "shoppingapp\\.lab\\.rippa\\.io$", line: "{{ shop_vip_ip }} shoppingapp.lab.rippa.io" }
-        - { re: "second-demo\\.lab\\.rippa\\.io$", line: "{{ galera_garbd_ip }} second-demo.lab.rippa.io" }
+        - { re: "demo-vm\\.lab\\.rippa\\.io$", line: "{{ galera_garbd_ip }} demo-vm.lab.rippa.io" }
 
 - name: Packages and directories on shop hosts
   hosts: webstore_shop
@@ -122,8 +122,8 @@
         regexp: "^{{ item.key }}="
         line: "{{ item.key }}={{ item.value }}"
       loop:
-        - { key: WEBAPP01_IP, value: "{{ webapp01_ip }}" }
-        - { key: WEBAPP02_IP, value: "{{ webapp02_ip }}" }
+        - { key: FRONTEND1_IP, value: "{{ frontend1_ip }}" }
+        - { key: FRONTEND2_IP, value: "{{ frontend2_ip }}" }
         - { key: SHOP_VIP_IP, value: "{{ shop_vip_ip }}" }
         - { key: LDAP_URL, value: "ldap://{{ ansible_default_ipv4.address }}:389" }
         - { key: LDAP_PEER_URL, value: "ldap://{{ keepalived_peer_ip }}:389" }

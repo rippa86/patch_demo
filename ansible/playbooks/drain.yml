@@ -11,7 +11,7 @@
         that:
           - target is defined
           - target in groups['webstore_shop']
-        fail_msg: "Pass -e target=webapp01.lab.rippa.io"
+        fail_msg: "Pass -e target=web-frontend1.lab.rippa.io"
 
 - name: Move VIP off the target if it owns it
   hosts: "{{ target }}"

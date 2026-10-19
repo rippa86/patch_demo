@@ -25,17 +25,17 @@
 #   Or an ACI on ou=People granting add to the api DN.
 #
 # Replication (supplier on both hosts):
-# webapp01:
+# web-frontend1:
 #   dsconf webstore replication enable --suffix "dc=webstore,dc=local" \
 #     --role supplier --replica-id 1
-# webapp02:
+# web-frontend2:
 #   dsconf webstore replication enable --suffix "dc=webstore,dc=local" \
 #     --role supplier --replica-id 2
 #
 # Agreements (run on each side pointing at the peer, LDAPS if certs exist):
 #   dsconf webstore repl-agmt create \
 #     --suffix "dc=webstore,dc=local" \
-#     --host webapp02.lab.rippa.io --port 389 --conn-protocol LDAP \
+#     --host web-frontend2.lab.rippa.io --port 389 --conn-protocol LDAP \
 #     --bind-dn "cn=Directory Manager" --bind-passwd "$LDAP_MANAGER_PASSWORD" \
 #     --bind-method SIMPLE \
 #     meToPeer
