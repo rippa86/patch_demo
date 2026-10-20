@@ -1,4 +1,4 @@
-[mysqld]
+[mariadb]
 bind-address = 0.0.0.0
 default_storage_engine = InnoDB
 binlog_format = ROW
@@ -9,7 +9,7 @@ wsrep_cluster_name = webstore
 {% if galera_bootstrap | default(false) %}
 wsrep_cluster_address = gcomm://
 {% else %}
-wsrep_cluster_address = gcomm://{{ frontend1_ip }},{{ frontend2_ip }}
+wsrep_cluster_address = gcomm://{{ frontend1_ip }},{{ frontend2_ip }},{{ galera_garbd_ip }}
 {% endif %}
 wsrep_node_address = {{ ansible_default_ipv4.address }}
 wsrep_node_name = {{ inventory_hostname }}

@@ -21,7 +21,7 @@
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../deploy/galera/galera.cnf.j2"
         dest: /etc/webstore/galera.cnf
-        mode: "0600"
+        mode: "0644"
       vars:
         mariadb_root_password: "{{ mariadb_pw.stdout }}"
     - name: Start MariaDB on web-frontend2 (joins web-frontend1)

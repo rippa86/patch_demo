@@ -6,6 +6,7 @@ Requires=webstore-mariadb.service
 [Container]
 Image=localhost/webstore-backend:1.0
 ContainerName=webstore-backend
+HostName=backend
 Network=webstore-net.network
 PublishPort=8001:8001
 EnvironmentFile=/etc/webstore/webstore.env

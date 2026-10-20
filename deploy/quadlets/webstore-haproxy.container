@@ -6,6 +6,10 @@ After=network-online.target webstore-httpd.service
 Image=docker.io/library/haproxy:2.8.14
 ContainerName=webstore-haproxy
 Network=host
+User=0
+# Image entrypoint drops to user haproxy; run the binary as root so :80 and the stats socket bind.
+PodmanArgs=--entrypoint haproxy
+Exec=-f /usr/local/etc/haproxy/haproxy.cfg -W -db
 Volume=/opt/webstore/deploy/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
 Volume=/var/run/webstore:/var/run/webstore
 AddCapability=NET_BIND_SERVICE

@@ -3,7 +3,7 @@ shop_vip_ip: "10.10.4.50"
 galera_garbd_ip: "10.10.4.108"
 keepalived_pass: shopvrrp
 repo_dest: /opt/webstore
-haproxy_socket: /var/run/webstore/haproxy.sock
+haproxy_socket: TCP:127.0.0.1:9999
 haproxy_backends:
   - be_httpd
   - be_account

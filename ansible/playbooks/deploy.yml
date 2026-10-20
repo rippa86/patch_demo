@@ -53,7 +53,7 @@
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
-        mode: "{{ '0700' if item == '/etc/webstore' else '0755' }}"
+        mode: "{{ '0700' if item == '/etc/webstore' else ('1777' if item == '/var/run/webstore' else '0755') }}"
       loop:
         - /opt/webstore
         - /etc/webstore
@@ -136,7 +136,7 @@
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../deploy/galera/galera.cnf.j2"
         dest: /etc/webstore/galera.cnf
-        mode: "0600"
+        mode: "0644"
       vars:
         mariadb_root_password: "{{ mariadb_pw.stdout }}"
     - name: Template keepalived
