@@ -36,11 +36,11 @@
         status_code: 200
       register: login
 
-    - name: List three products
+    - name: List products (three seeded, admins may add more)
       ansible.builtin.uri:
         url: "{{ shop_url }}/api/cart/products"
       register: products
-      failed_when: products.json | length != 3
+      failed_when: products.json | length < 3
 
     - name: Logout
       ansible.builtin.uri:

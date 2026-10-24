@@ -10,6 +10,8 @@ HostName=backend
 Network=webstore-net.network
 PublishPort=8001:8001
 EnvironmentFile=/etc/webstore/webstore.env
+# %l = this host's short hostname; tags each login session with the node.
+Environment=NODE_NAME=%l
 
 [Service]
 Restart=always

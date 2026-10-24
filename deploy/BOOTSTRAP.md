@@ -87,6 +87,7 @@ sudo systemctl enable --now \
   webstore-api-logout.service \
   webstore-api-cart.service \
   webstore-api-stats.service \
+  webstore-api-admin.service \
   webstore-httpd.service \
   webstore-haproxy.service \
   keepalived.service

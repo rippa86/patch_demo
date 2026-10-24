@@ -10,12 +10,14 @@ haproxy_backends:
   - be_login
   - be_logout
   - be_cart
+  - be_admin
 shop_api_units:
   - webstore-api-account.service
   - webstore-api-login.service
   - webstore-api-logout.service
   - webstore-api-cart.service
   - webstore-api-stats.service
+  - webstore-api-admin.service
 shop_app_units:
   - webstore-backend.service
   - webstore-httpd.service

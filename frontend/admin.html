@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin · Rippa Lab Store</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <header>
+    <div class="brand">Rippa Lab Store<span>Admin</span></div>
+    <nav>
+      <a href="/">Shop</a>
+      <a href="/account.html">Create account</a>
+      <a href="/admin.html">Admin</a>
+    </nav>
+  </header>
+  <main>
+    <section class="card" id="admin-login" style="max-width:420px" hidden>
+      <h1>Admin sign in</h1>
+      <p class="msg">Only users in the <code>admins</code> table can manage the catalog.</p>
+      <form id="admin-login-form">
+        <label for="admin-user">Username</label>
+        <input id="admin-user" autocomplete="username" required value="admin">
+        <label for="admin-pass">Password</label>
+        <input id="admin-pass" type="password" autocomplete="current-password" required>
+        <button type="submit">Sign in</button>
+        <div class="msg" id="admin-login-msg"></div>
+      </form>
+    </section>
+
+    <div id="admin-panel" hidden>
+      <section class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <h1 style="margin:0">Catalog</h1>
+          <div class="auth"><span id="admin-who"></span>
+            <button type="button" class="secondary" id="admin-logout">Log out</button></div>
+        </div>
+        <div class="msg" id="catalog-msg"></div>
+        <div class="table-wrap">
+          <table class="admin">
+            <thead>
+              <tr><th class="col-sku">SKU</th><th>Name</th><th>Price</th><th>Stock</th><th>Restock</th></tr>
+            </thead>
+            <tbody id="catalog"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="grid" style="margin-top:24px">
+        <section class="card">
+          <h2>New product</h2>
+          <form id="create-form">
+            <div class="form-row">
+              <div>
+                <label for="new-sku">SKU</label>
+                <input id="new-sku" required minlength="2" maxlength="32" pattern="[A-Za-z0-9._-]+" placeholder="WOOL-BEANIE">
+              </div>
+              <div>
+                <label for="new-name">Name</label>
+                <input id="new-name" required maxlength="128" placeholder="Wool beanie">
+              </div>
+            </div>
+            <label for="new-desc">Description</label>
+            <input id="new-desc" maxlength="2000">
+            <div class="form-row">
+              <div>
+                <label for="new-price">Price ($)</label>
+                <input id="new-price" type="number" required min="0.01" step="0.01" placeholder="29.00">
+              </div>
+              <div>
+                <label for="new-stock">Initial stock</label>
+                <input id="new-stock" type="number" required min="0" step="1" value="25">
+              </div>
+            </div>
+            <button type="submit">Create product</button>
+            <div class="msg" id="create-msg"></div>
+          </form>
+        </section>
+
+        <section class="card">
+          <h2>Recent changes</h2>
+          <div id="inv-log" class="msg"></div>
+        </section>
+      </div>
+    </div>
+
+    <section class="card" id="admin-denied" style="max-width:520px" hidden>
+      <h1>Admins only</h1>
+      <p class="msg bad" id="denied-msg"></p>
+      <button type="button" class="secondary" id="denied-logout">Log out and switch user</button>
+    </section>
+  </main>
+  <script type="module" src="/js/admin.js"></script>
+</body>
+</html>

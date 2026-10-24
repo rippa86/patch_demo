@@ -1,0 +1,18 @@
+[Unit]
+Description=webstore Prometheus
+After=network-online.target webstore-exporter.service
+
+[Container]
+Image=quay.io/prometheus/prometheus:v2.55.1
+ContainerName=webstore-prometheus
+Network=host
+User=0
+Volume=/etc/webstore/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+Volume=webstore-prometheus-data:/prometheus
+Exec=--config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d --web.listen-address=127.0.0.1:9090
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

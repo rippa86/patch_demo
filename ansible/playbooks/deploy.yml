@@ -99,11 +99,13 @@
         - api-logout
         - api-cart
         - api-stats
+        - api-admin
         - frontend
         - dashboard
         - synth-users
         - deploy
         - ansible
+        - monitoring
 
 - name: Shop host config and images
   hosts: webstore_shop
@@ -158,6 +160,7 @@
         - webstore-api-logout.container
         - webstore-api-cart.container
         - webstore-api-stats.container
+        - webstore-api-admin.container
         - webstore-httpd.container
         - webstore-haproxy.container
     - name: Read Directory Manager password
@@ -182,6 +185,7 @@
         - { tag: "localhost/webstore-api-logout:1.0", path: "{{ repo_dest }}/api-logout" }
         - { tag: "localhost/webstore-api-cart:1.0", path: "{{ repo_dest }}/api-cart" }
         - { tag: "localhost/webstore-api-stats:1.0", path: "{{ repo_dest }}/api-stats" }
+        - { tag: "localhost/webstore-api-admin:1.0", path: "{{ repo_dest }}/api-admin" }
         - { tag: "localhost/webstore-httpd:1.0", path: "{{ repo_dest }}/frontend" }
     - name: Reload systemd
       ansible.builtin.command: systemctl daemon-reload

@@ -7,6 +7,7 @@
 # From the 10.10.4.0/24 lab LAN (peer HAProxy health checks, Galera, LDAP):
 #   firewall-cmd --permanent --zone=public --add-rich-rule='rule family=ipv4 source address=10.10.4.0/24 port port="8080" protocol=tcp accept'
 #   firewall-cmd --permanent --zone=public --add-rich-rule='rule family=ipv4 source address=10.10.4.0/24 port port="8010-8013" protocol=tcp accept'
+#   firewall-cmd --permanent --zone=public --add-rich-rule='rule family=ipv4 source address=10.10.4.0/24 port port="8015" protocol=tcp accept'   # api-admin
 #   firewall-cmd --permanent --zone=public --add-rich-rule='rule family=ipv4 source address=10.10.4.0/24 port port="8001" protocol=tcp accept'
 #   firewall-cmd --permanent --zone=public --add-rich-rule='rule family=ipv4 source address=10.10.4.0/24 port port="3306" protocol=tcp accept'
 #   firewall-cmd --permanent --zone=public --add-rich-rule='rule family=ipv4 source address=10.10.4.0/24 port port="4444" protocol=tcp accept'

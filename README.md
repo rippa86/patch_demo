@@ -13,9 +13,10 @@ Architecture details: [docs/HLD.md](docs/HLD.md). Long-form bootstrap notes: [de
 
 ## What you get
 
-- Shop UI: create account, login, logout, cart with three products
-- Separate APIs: `/api/account`, `/api/login`, `/api/logout`, `/api/cart`
-- Ops page: live logged-in count and graph
+- Shop UI: create account, login, logout, cart (three seeded products)
+- Admin page (`/admin.html`): create products and restock, for users in the `admins` table
+- Separate APIs: `/api/account`, `/api/login`, `/api/logout`, `/api/cart`, `/api/admin`
+- Grafana on demo-vm: active users, API traffic, Galera and LDAP per node ([monitoring/](monitoring/README.md))
 - Optional: 100 synthetic users logging in and out about every 30s
 
 ## Prerequisites
@@ -133,15 +134,16 @@ sudo systemctl enable --now \
   webstore-api-logout.service \
   webstore-api-cart.service \
   webstore-api-stats.service \
+  webstore-api-admin.service \
   webstore-httpd.service \
   webstore-haproxy.service \
   keepalived.service
 ```
 
-On **demo-vm**:
+On **demo-vm**, install monitoring (Prometheus + Grafana); see [monitoring/README.md](monitoring/README.md):
 
 ```bash
-sudo systemctl enable --now webstore-httpd-dash.service
+sudo ./monitoring/setup-monitoring.sh
 ```
 
 After the VIP answers HTTP, start synthetic logins:
@@ -156,7 +158,8 @@ sudo systemctl enable --now webstore-synth-users.service
 | --- | --- |
 | Shop | http://shoppingapp.lab.rippa.io/ |
 | Create account | http://shoppingapp.lab.rippa.io/account.html |
-| Logged-in graph | http://demo-vm.lab.rippa.io/ |
+| Admin (catalog) | http://shoppingapp.lab.rippa.io/admin.html |
+| Grafana | http://demo-vm.lab.rippa.io:3000/ |
 
 ```bash
 cd ansible
@@ -164,6 +167,37 @@ ansible-playbook playbooks/smoke.yml
 ```
 
 You should be able to register, log in, add the three catalog items to a cart, and check out. The ops page should move as synth users (or you) log in and out.
+
+## Admin user
+
+The admin login lives in LDAP like every other user; the **role** lives in MariaDB
+(`admins` table, seeded at backend start from `ADMIN_USERS`, default `admin`).
+`api-account` refuses to register reserved names (`RESERVED_USERNAMES`), so nobody can
+sign up as `admin` and inherit the role.
+
+1. Add `ADMIN_PASSWORD=...` to `/etc/webstore/webstore.env` on web-frontend1.
+2. Create the LDAP entry (replicates to web-frontend2):
+
+   ```bash
+   sudo /opt/webstore/deploy/ldap/create-admin.sh
+   ```
+
+3. Sign in at `/admin.html` as `admin`.
+
+| Endpoint (JWT from `/api/login`, admin only) | Does |
+| --- | --- |
+| `GET /api/admin/me` | 200 if the caller is an admin, 403 otherwise |
+| `GET /api/admin/products` | Catalog with stock |
+| `POST /api/admin/products` `{sku, name, description, price_cents, stock}` | Create a product (409 on duplicate SKU) |
+| `POST /api/admin/products/{id}/restock` `{qty}` | Add stock atomically |
+| `GET /api/admin/inventory-log` | Who created/restocked what, newest first |
+
+Grant or revoke admins in SQL; it takes effect on the next request:
+
+```sql
+INSERT INTO webstore.admins (uid) VALUES ('alice');
+DELETE FROM webstore.admins WHERE uid = 'alice';
+```
 
 ## Drain one shop host
 
@@ -189,8 +223,10 @@ There are no operator `webstore-drain.sh` scripts; use these playbooks.
 | `frontend/` | Shop HTML/JS (httpd) |
 | `api-account/` `api-login/` `api-logout/` `api-cart/` | Public APIs |
 | `api-stats/` | Ops graph data (not on the shop VIP) |
+| `api-admin/` | Catalog management (`/api/admin`, admins only) |
+| `monitoring/` | Exporter, Prometheus and Grafana for demo-vm |
 | `backend/` | SQL, sessions, cart |
-| `dashboard/` | Logged-in graph (demo-vm) |
+| `dashboard/` | Old logged-in graph (superseded by `monitoring/`) |
 | `synth-users/` | 100 lab logins against the VIP |
 | `ansible/playbooks/` | deploy, Galera, drain, restore, smoke |
 | `deploy/` | Quadlets, HAProxy, keepalived, LDAP, env example |

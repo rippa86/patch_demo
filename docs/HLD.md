@@ -120,6 +120,7 @@ VIP stays on the same L2 as the shop hosts (`10.10.4.0/24`). `demo-vm` does not 
 | api-logout | Podman | 8012 | `/api/logout` | `/healthz` (backend) |
 | api-cart | Podman | 8013 | `/api/cart` | `/healthz` (backend) |
 | api-stats | Podman | 8014 | **ops VM only** | `/healthz` (backend) |
+| api-admin | Podman | 8015 | `/api/admin` (admins table) | `/healthz` (backend) |
 | backend | Podman | 8001 | **no** | `wsrep` Synced |
 | mariadb | Podman | 3306 + Galera | **no** | Primary + Synced |
 | 389-ds | shop host | 389, 636 | **no** | LDAPS + MMR |
@@ -135,6 +136,7 @@ HAProxy path map (`shoppingapp.lab.rippa.io`):
 - `/api/login` → api-login web-frontend1+web-frontend2
 - `/api/logout` → api-logout web-frontend1+web-frontend2
 - `/api/cart` → api-cart web-frontend1+web-frontend2
+- `/api/admin` → api-admin web-frontend1+web-frontend2 (JWT + `admins` row required)
 - default `/` → httpd-shop web-frontend1+web-frontend2
 
 Dashboard JS calls `http://web-frontend1.lab.rippa.io:8014` and `http://web-frontend2.lab.rippa.io:8014` with failover — **not** via shoppingapp.
@@ -155,7 +157,10 @@ LDAP: `ou=People`, `ou=Services`. Privileged DN for account create. User passwor
 
 MariaDB:
 
-- `products` — exactly three seed rows
+- `products` — three seed rows; admins add more and restock via `/api/admin`
+- `admins` — uids with the admin role (seeded from `ADMIN_USERS`; passwords stay in LDAP)
+- `inventory_log` — audit of admin create/restock
+- `sessions.node` — shop host whose backend issued the session (per-node active users)
 - `carts`, `cart_items`
 - `orders`, `order_items`
 - `sessions` — live logins

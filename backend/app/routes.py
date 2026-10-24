@@ -1,17 +1,31 @@
 import os
+import socket
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.db import galera_status, galera_synced, get_db
-from app.models import Cart, CartItem, Order, OrderItem, Product, SessionRow, SessionSample
+from app.models import (
+    Admin,
+    Cart,
+    CartItem,
+    InventoryLog,
+    Order,
+    OrderItem,
+    Product,
+    SessionRow,
+    SessionSample,
+)
 
 INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 JWT_EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", "30"))
+# Which shop host this backend runs on; the quadlet sets NODE_NAME=%l (short hostname).
+NODE_NAME = os.environ.get("NODE_NAME") or socket.gethostname()
 
 router = APIRouter()
 
@@ -104,6 +118,7 @@ def create_session(body: SessionCreate, db: Session = Depends(get_db)) -> dict:
             uid=body.uid,
             issued_at=now,
             expires_at=now + timedelta(minutes=JWT_EXPIRE_MINUTES),
+            node=NODE_NAME,
         )
     )
     _sample(db)
@@ -266,4 +281,99 @@ def list_orders(uid: str, db: Session = Depends(get_db)) -> list[dict]:
             ],
         }
         for order in orders
+    ]
+
+
+# --- Admin: role lookup and catalog management --------------------------------
+
+
+class ProductCreate(BaseModel):
+    uid: str = Field(min_length=1, max_length=64)
+    sku: str = Field(min_length=2, max_length=32, pattern=r"^[A-Za-z0-9._-]+$")
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(default="", max_length=2000)
+    price_cents: int = Field(ge=1, le=10_000_000)
+    stock: int = Field(default=0, ge=0, le=1_000_000)
+
+
+class Restock(BaseModel):
+    uid: str = Field(min_length=1, max_length=64)
+    qty: int = Field(ge=1, le=100_000)
+
+
+def _log(db: Session, product: Product, uid: str, action: str, delta: int) -> None:
+    db.add(
+        InventoryLog(
+            product_id=product.id,
+            uid=uid,
+            action=action,
+            delta=delta,
+            stock_after=product.stock,
+        )
+    )
+
+
+@router.get("/internal/admins/{uid}", dependencies=[Depends(require_internal)])
+def get_admin(uid: str, db: Session = Depends(get_db)) -> dict:
+    if db.get(Admin, uid) is None:
+        raise HTTPException(status_code=404, detail="not an admin")
+    return {"uid": uid, "admin": True}
+
+
+@router.post("/internal/products", dependencies=[Depends(require_internal)])
+def create_product(body: ProductCreate, db: Session = Depends(get_db)) -> dict:
+    sku = body.sku.strip().upper()
+    if db.scalar(select(Product.id).where(Product.sku == sku)) is not None:
+        raise HTTPException(status_code=409, detail=f"sku {sku} already exists")
+    product = Product(
+        sku=sku,
+        name=body.name.strip(),
+        description=body.description.strip(),
+        price_cents=body.price_cents,
+        stock=body.stock,
+    )
+    db.add(product)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"sku {sku} already exists") from None
+    _log(db, product, body.uid, "create", body.stock)
+    db.commit()
+    return _product_out(product)
+
+
+@router.post("/internal/products/{product_id}/restock", dependencies=[Depends(require_internal)])
+def restock_product(product_id: int, body: Restock, db: Session = Depends(get_db)) -> dict:
+    # Single atomic UPDATE so concurrent checkouts on either node are not lost.
+    result = db.execute(
+        update(Product)
+        .where(Product.id == product_id)
+        .values(stock=Product.stock + body.qty)
+    )
+    if result.rowcount == 0:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="product not found")
+    product = db.get(Product, product_id, populate_existing=True)
+    _log(db, product, body.uid, "restock", body.qty)
+    db.commit()
+    return _product_out(product)
+
+
+@router.get("/internal/inventory-log", dependencies=[Depends(require_internal)])
+def inventory_log(limit: int = 50, db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(
+        select(InventoryLog).order_by(InventoryLog.id.desc()).limit(max(1, min(limit, 500)))
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "product_id": r.product_id,
+            "uid": r.uid,
+            "action": r.action,
+            "delta": r.delta,
+            "stock_after": r.stock_after,
+            "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+        }
+        for r in rows
     ]
