@@ -225,6 +225,7 @@ There are no operator `webstore-drain.sh` scripts; use these playbooks.
 | `api-stats/` | Ops graph data (not on the shop VIP) |
 | `api-admin/` | Catalog management (`/api/admin`, admins only) |
 | `monitoring/` | Exporter, Prometheus and Grafana for demo-vm |
+| `tools/` | `create_accounts.py` (user1..user100) and `load_test.py` (simulated shoppers) |
 | `backend/` | SQL, sessions, cart |
 | `dashboard/` | Old logged-in graph (superseded by `monitoring/`) |
 | `synth-users/` | 100 lab logins against the VIP |
