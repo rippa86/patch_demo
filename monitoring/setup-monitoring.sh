@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install / update the monitoring stack on demo-vm (run as root from a repo checkout):
 #   webstore-exporter  127.0.0.1:9200  polls HAProxy, Galera and LDAP on both shop nodes
-#   webstore-prometheus 127.0.0.1:9090 stores 15 days of metrics
+#   webstore-prometheus 127.0.0.1:9091 stores 15 days of metrics
 #   webstore-grafana   :3000          "Webstore - Overview" dashboard
 #
 #   sudo ./monitoring/setup-monitoring.sh
@@ -59,6 +59,8 @@ podman pull docker.io/grafana/grafana-oss:11.6.0
 install -m 0644 "$HERE"/quadlets/*.container /etc/containers/systemd/
 
 firewall-cmd --permanent --add-port=3000/tcp >/dev/null && firewall-cmd --reload >/dev/null
+# A firewalld reload drops Podman's port-forward rules; put them back.
+podman network reload --all >/dev/null 2>&1 || true
 
 systemctl daemon-reload
 systemctl restart webstore-exporter webstore-prometheus webstore-grafana
@@ -67,7 +69,7 @@ systemctl restart webstore-exporter webstore-prometheus webstore-grafana
 echo "Waiting for services..."
 for _ in $(seq 1 60); do
   curl -sf http://127.0.0.1:9200/metrics >/dev/null \
-    && curl -sf http://127.0.0.1:9090/-/ready >/dev/null \
+    && curl -sf http://127.0.0.1:9091/-/ready >/dev/null \
     && curl -sf http://127.0.0.1:3000/api/health >/dev/null && break
   sleep 2
 done

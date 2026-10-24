@@ -13,7 +13,7 @@ server-side on demo-vm instead.
   │                                  ▼                     │
   │                       webstore-exporter 127.0.0.1:9200 │──► MariaDB :3306  web-frontend1/2
   │                                  ▲                     │──► 389-ds  :389   web-frontend1/2
-  │  Grafana :3000 ──► Prometheus 127.0.0.1:9090 (scrape)  │
+  │  Grafana :3000 ──► Prometheus 127.0.0.1:9091 (scrape)  │
   └───────────────────────────────────────────────────────┘
 ```
 

@@ -9,7 +9,7 @@ Network=host
 User=0
 Volume=/etc/webstore/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
 Volume=webstore-prometheus-data:/prometheus
-Exec=--config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d --web.listen-address=127.0.0.1:9090
+Exec=--config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d --web.listen-address=127.0.0.1:9091
 
 [Service]
 Restart=always
