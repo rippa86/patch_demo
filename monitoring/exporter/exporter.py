@@ -14,6 +14,7 @@ Configuration is environment variables (see monitoring/monitoring.env.example).
 import csv
 import io
 import logging
+import math
 import os
 import time
 import urllib.request
@@ -261,7 +262,8 @@ def fetch_ldap(ip: str) -> dict:
     server = Server(f"ldap://{ip}:{LDAP_PORT}", connect_timeout=TIMEOUT)
     conn = Connection(
         server, user=LDAP_BIND_DN, password=LDAP_BIND_PASSWORD,
-        auto_bind=True, receive_timeout=TIMEOUT, raise_exceptions=True,
+        # ldap3 packs SO_RCVTIMEO as whole seconds on Linux: must be an int.
+        auto_bind=True, receive_timeout=max(1, math.ceil(TIMEOUT)), raise_exceptions=True,
     )
     bind_seconds = time.monotonic() - start
     try:
