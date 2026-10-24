@@ -34,6 +34,9 @@ so that split follows HAProxy's load balancing.
 
 ## Install
 
+`ansible/playbooks/site.yml` installs all of this automatically. The manual steps below are the
+equivalent without Ansible.
+
 1. **On web-frontend1**, create the read-only DB user (Galera replicates it):
 
    ```bash

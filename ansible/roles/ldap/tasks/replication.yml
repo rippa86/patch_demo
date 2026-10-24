@@ -1,0 +1,83 @@
+---
+# Multi-supplier: replica id 1 on frontend1, 2 on frontend2, agreement "meToPeer"
+# on each side, bound as cn=replication manager,cn=config (password = lab_password).
+
+- name: Is replication enabled?
+  ansible.builtin.command: dsconf webstore replication get --suffix "{{ ldap_suffix }}"
+  register: repl_get
+  changed_when: false
+  failed_when: false
+
+- name: Enable replication (supplier, id {{ ldap_replica_id }})
+  ansible.builtin.command:
+    argv: [dsconf, webstore, replication, enable, --suffix, "{{ ldap_suffix }}",
+           --role, supplier, --replica-id, "{{ ldap_replica_id }}",
+           --bind-dn, "{{ ldap_repl_manager_dn }}", --bind-passwd, "{{ lab_password }}"]
+  when: repl_get.rc != 0
+  no_log: true
+
+- name: Replication manager exists with lab_password
+  ansible.builtin.shell: |
+    set -e
+    DN="{{ ldap_repl_manager_dn }}"
+    if ! ldapsearch -x -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$LDAP_PW" -b "$DN" -s base dn >/dev/null 2>&1; then
+      dsconf webstore replication create-manager --name "replication manager" --passwd "$LDAP_PW" >/dev/null
+      echo "created manager"
+    elif ! ldapwhoami -x -H ldap://127.0.0.1:389 -D "$DN" -w "$LDAP_PW" >/dev/null 2>&1; then
+      printf 'dn: %s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n' "$DN" "$LDAP_PW" \
+        | ldapmodify -x -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$LDAP_PW" >/dev/null
+      echo "reset manager password"
+    fi
+    if ! dsconf webstore replication get --suffix "{{ ldap_suffix }}" | grep -qi "binddn: $DN"; then
+      dsconf webstore replication set --suffix "{{ ldap_suffix }}" --repl-add-bind-dn "$DN" >/dev/null
+      echo "allowed manager"
+    fi
+  environment:
+    LDAP_PW: "{{ lab_password }}"
+  register: repl_mgr
+  changed_when: repl_mgr.stdout | length > 0
+
+- name: Existing agreements
+  ansible.builtin.command: dsconf webstore repl-agmt list --suffix "{{ ldap_suffix }}"
+  register: agmts
+  changed_when: false
+  failed_when: false
+
+- name: Agreement to the peer ({{ peer_ip }})
+  ansible.builtin.command:
+    argv: [dsconf, webstore, repl-agmt, create, --suffix, "{{ ldap_suffix }}",
+           --host, "{{ peer_ip }}", --port, "389", --conn-protocol, LDAP,
+           --bind-dn, "{{ ldap_repl_manager_dn }}", --bind-passwd, "{{ lab_password }}",
+           --bind-method, SIMPLE, meToPeer]
+  when: "'metopeer' not in (agmts.stdout | lower)"
+  no_log: true
+
+# A fresh peer only has the empty base entries. Initialise it from frontend1
+# (total update). Skipped when the peer already has the api account.
+- name: Does the peer already hold the data?
+  ansible.builtin.command:
+    argv: [ldapsearch, -x, -H, "ldap://{{ peer_ip }}:389", -D, "cn=Directory Manager",
+           -w, "{{ lab_password }}", -b, "{{ ldap_service_dn }}", -s, base, dn]
+  register: peer_has_data
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: inventory_hostname == frontend1_fqdn
+
+- name: Initialise the peer from {{ frontend1_name }}
+  ansible.builtin.command: dsconf webstore repl-agmt init --suffix "{{ ldap_suffix }}" meToPeer
+  when:
+    - inventory_hostname == frontend1_fqdn
+    - peer_has_data.rc != 0
+
+- name: Wait for the initialisation to finish
+  ansible.builtin.command: dsconf webstore repl-agmt init-status --suffix "{{ ldap_suffix }}" meToPeer
+  register: init_status
+  until: "'successfully initialized' in init_status.stdout or 'failed' in (init_status.stdout | lower)"
+  retries: 30
+  delay: 5
+  changed_when: false
+  failed_when: "'successfully initialized' not in init_status.stdout"
+  when:
+    - inventory_hostname == frontend1_fqdn
+    - peer_has_data.rc != 0

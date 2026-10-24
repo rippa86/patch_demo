@@ -1,3 +1,5 @@
-keepalived_priority: 100
-keepalived_state: BACKUP
-ansible_host: 10.10.4.116
+ansible_host: "{{ frontend2_ip }}"
+node_ip: "{{ frontend2_ip }}"
+node_name: "{{ frontend2_name }}"
+peer_ip: "{{ frontend1_ip }}"
+ldap_replica_id: 2

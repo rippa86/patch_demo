@@ -1,13 +1,16 @@
-# Copy to inventory.ini.
+# Copy to inventory.ini. IP addresses live in group_vars/all/main.yml.
 #   cp inventory.ini.example inventory.ini
 
 [webstore_shop]
-web-frontend1.lab.rippa.io ansible_host=10.10.4.115
-web-frontend2.lab.rippa.io ansible_host=10.10.4.116
+web-frontend1.lab.rippa.io
+web-frontend2.lab.rippa.io
 
 [webstore_ops]
-demo-vm.lab.rippa.io ansible_host=10.10.4.108
+demo-vm.lab.rippa.io
 
 [webstore:children]
 webstore_shop
 webstore_ops
+
+[webstore:vars]
+ansible_user=root

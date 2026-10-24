@@ -1,65 +1,50 @@
 ---
-- name: Restore a shop host
+# Bring a drained node back:  ansible-playbook playbooks/restore.yml -e target=web-frontend1.lab.rippa.io -e lab_password='...'
+- name: Start the target's services
   hosts: "{{ target }}"
   become: true
-  gather_facts: true
+  gather_facts: false
   pre_tasks:
-    - name: Require target extra-var
+    - name: Require target
       ansible.builtin.assert:
         that:
           - target is defined
+          - target in groups['webstore_shop']
         fail_msg: "Pass -e target=web-frontend1.lab.rippa.io"
-
   tasks:
-    - name: Start 389-ds
+    - name: 389-ds
       ansible.builtin.systemd:
         name: dirsrv@webstore
         state: started
-        enabled: true
     - name: Wait for LDAP
       ansible.builtin.wait_for:
         port: 389
-        delay: 2
         timeout: 60
-    - name: Start MariaDB (joins existing Primary)
+    - name: Clear stale SST state before rejoining
+      ansible.builtin.include_role:
+        name: galera
+        tasks_from: clear_stale_sst
+    - name: MariaDB (rejoins via IST)
       ansible.builtin.systemd:
         name: webstore-mariadb.service
         state: started
-        enabled: true
-    - name: Wait for Galera local port
-      ansible.builtin.wait_for:
-        port: 3306
-        timeout: 120
-    - name: Start backend
-      ansible.builtin.systemd:
-        name: webstore-backend.service
-        state: started
-    - name: Wait for backend health
-      ansible.builtin.uri:
-        url: http://127.0.0.1:8001/healthz
-        status_code: 200
-      register: backend_health
-      until: backend_health.status == 200
-      retries: 30
-      delay: 4
-    - name: Start APIs and httpd
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        state: started
-      loop: "{{ shop_api_units + ['webstore-httpd.service', 'webstore-haproxy.service'] }}"
-    - name: Start keepalived
-      ansible.builtin.systemd:
-        name: keepalived
-        state: started
-        enabled: true
+    - name: Wait for Galera sync
+      ansible.builtin.include_role:
+        name: galera
+        tasks_from: wait_synced
+    - name: Backend, APIs, httpd
+      ansible.builtin.include_role:
+        name: shop_apps
+        tasks_from: start
 
-- name: Re-enable the target in HAProxy
-  hosts: webstore_shop
+- name: Put the target back into HAProxy
+  hosts: webstore_ops
   become: true
   gather_facts: false
-  vars:
-    haproxy_server: "{{ target }}"
-    haproxy_state: ready
   tasks:
-    - ansible.builtin.include_role:
+    - name: Ready
+      ansible.builtin.include_role:
         name: haproxy_state
+      vars:
+        haproxy_server: "{{ hostvars[target].node_name }}"
+        haproxy_state: ready

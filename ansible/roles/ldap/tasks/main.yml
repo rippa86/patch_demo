@@ -1,0 +1,102 @@
+---
+# 389 Directory Server on each shop host, multi-supplier replication between them.
+# Every step checks first, so this is safe to re-run on a live lab.
+
+- name: 389-ds packages
+  ansible.builtin.dnf:
+    name: [389-ds-base, openldap-clients]
+    state: present
+
+- name: dscreate answer file
+  ansible.builtin.template:
+    src: instance.inf.j2
+    dest: /etc/webstore/instance.inf
+    mode: "0600"
+  no_log: true
+
+- name: Does the instance exist?
+  ansible.builtin.stat:
+    path: /etc/dirsrv/slapd-webstore
+  register: ds_instance
+
+- name: Create the instance
+  ansible.builtin.command: dscreate from-file /etc/webstore/instance.inf
+  when: not ds_instance.stat.exists
+
+- name: Directory server running
+  ansible.builtin.systemd:
+    name: dirsrv@webstore
+    state: started
+    enabled: true
+
+- name: Wait for LDAP
+  ansible.builtin.wait_for:
+    port: 389
+    timeout: 60
+
+- name: Read listen/security settings
+  ansible.builtin.command: dsconf webstore config get nsslapd-listenhost nsslapd-minssf nsslapd-require-secure-binds
+  register: ds_cfg
+  changed_when: false
+
+- name: Listen on all addresses; allow simple binds without TLS (lab)
+  ansible.builtin.command: >-
+    dsconf webstore config replace nsslapd-listenhost=0.0.0.0 nsslapd-minssf=0
+    nsslapd-require-secure-binds=off
+  when: >-
+    'nsslapd-listenhost: 0.0.0.0' not in ds_cfg.stdout
+    or 'nsslapd-minssf: 0' not in ds_cfg.stdout
+    or 'nsslapd-require-secure-binds: off' not in ds_cfg.stdout
+  register: ds_cfg_set
+
+- name: Restart to apply listen address
+  ansible.builtin.systemd:
+    name: dirsrv@webstore
+    state: restarted
+  when: ds_cfg_set is changed
+
+- name: Wait for LDAP after restart
+  ansible.builtin.wait_for:
+    port: 389
+    timeout: 60
+  when: ds_cfg_set is changed
+
+- name: Base entries (suffix, People, Services)
+  ansible.builtin.shell: |
+    set -e
+    add() {  # $1 = dn, stdin = ldif
+      if ldapsearch -x -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$LDAP_PW" -b "$1" -s base dn >/dev/null 2>&1; then
+        cat >/dev/null
+      else
+        ldapadd -x -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$LDAP_PW" >/dev/null; echo "added $1"
+      fi
+    }
+    add "{{ ldap_suffix }}" <<LDIF
+    dn: {{ ldap_suffix }}
+    objectClass: top
+    objectClass: domain
+    dc: {{ ldap_suffix.split(',')[0].split('=')[1] }}
+    LDIF
+    add "{{ ldap_people_ou }}" <<LDIF
+    dn: {{ ldap_people_ou }}
+    objectClass: top
+    objectClass: organizationalUnit
+    ou: People
+    LDIF
+    add "ou=Services,{{ ldap_suffix }}" <<LDIF
+    dn: ou=Services,{{ ldap_suffix }}
+    objectClass: top
+    objectClass: organizationalUnit
+    ou: Services
+    LDIF
+  environment:
+    LDAP_PW: "{{ lab_password }}"
+  register: ldap_base
+  changed_when: "'added' in ldap_base.stdout"
+
+- name: Seed data on {{ frontend1_name }} (replicated to the peer)
+  ansible.builtin.include_tasks: seed.yml
+  when: inventory_hostname == frontend1_fqdn
+
+- name: Replication
+  ansible.builtin.include_tasks: replication.yml

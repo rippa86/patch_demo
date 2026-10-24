@@ -1,0 +1,84 @@
+---
+- name: Check lab_password is set and safe for env files
+  ansible.builtin.assert:
+    that:
+      - lab_password is defined
+      - lab_password | length >= 8
+      - lab_password is not search('[\s"''$`\\#]')
+    fail_msg: >-
+      Set lab_password (8+ chars, no spaces/quotes/$/`/\/#), e.g.
+      ansible-playbook playbooks/site.yml -e lab_password='batman123!'
+    quiet: true
+  run_once: true
+
+- name: Lab names in /etc/hosts (works without site DNS)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '\s{{ item.name | regex_escape }}(\s|$)'
+    line: "{{ item.ip }} {{ item.name }} {{ item.name.split('.')[0] }}"
+  loop:
+    - { name: "{{ frontend1_fqdn }}", ip: "{{ frontend1_ip }}" }
+    - { name: "{{ frontend2_fqdn }}", ip: "{{ frontend2_ip }}" }
+    - { name: "{{ ops_fqdn }}", ip: "{{ ops_ip }}" }
+    - { name: "{{ shop_vip_dns }}", ip: "{{ shop_vip_ip }}" }
+
+- name: Base packages
+  ansible.builtin.dnf:
+    name: [podman, rsync, socat, chrony, firewalld, policycoreutils-python-utils]
+    state: present
+
+- name: Time sync (sessions, Galera and Grafana all depend on matching clocks)
+  ansible.builtin.systemd:
+    name: chronyd
+    state: started
+    enabled: true
+
+- name: Firewalld running
+  ansible.builtin.systemd:
+    name: firewalld
+    state: started
+    enabled: true
+
+- name: Check for netavark's firewalld-reload helper
+  ansible.builtin.stat:
+    path: /usr/lib/systemd/system/netavark-firewalld-reload.service
+  register: netavark_reload
+
+- name: Restore Podman port forwards automatically after any firewalld reload
+  ansible.builtin.systemd:
+    name: netavark-firewalld-reload.service
+    state: started
+    enabled: true
+  when: netavark_reload.stat.exists
+
+- name: Directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ repo_dest }}", mode: "0755" }
+    - { path: /etc/webstore, mode: "0700" }
+    - { path: /etc/containers/systemd, mode: "0755" }
+
+- name: Ship source trees to {{ repo_dest }}
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/{{ item }}"
+    dest: "{{ repo_dest }}/"
+    mode: preserve
+  loop: [backend, api-account, api-login, api-logout, api-cart, api-stats, api-admin,
+         frontend, dashboard, synth-users, deploy, monitoring, tools]
+  register: shipped_sources
+
+- name: Work out this host's firewall rules
+  ansible.builtin.set_fact:
+    fw_rules: >-
+      {{ ((shop_firewall_lab_ports | product([lab_subnet]) | list)
+          + (shop_firewall_ops_ports | product([ops_ip]) | list)
+          if inventory_hostname in groups['webstore_shop'] else
+          (ops_firewall_public_ports | product(['']) | list)
+          + (ops_firewall_lab_ports | product([lab_subnet]) | list))
+         | map('list') | list }}
+
+- name: Firewall rules for this host
+  ansible.builtin.include_tasks: firewall.yml

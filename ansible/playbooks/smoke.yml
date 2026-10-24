@@ -1,67 +1,74 @@
 ---
-- name: Smoke-test shop VIP and stats
-  hosts: localhost
-  connection: local
+# End-to-end checks, run from demo-vm (it can reach everything).
+#   ansible-playbook playbooks/smoke.yml -e lab_password='...'
+- name: Smoke test
+  hosts: webstore_ops
+  become: true
   gather_facts: false
   vars:
-    shop_url: "http://{{ shop_vip_dns }}"
-    unique: "smoke{{ 10000 | random }}"
+    base: "http://{{ shop_vip_ip }}"
   tasks:
-    - name: Frontend health through VIP
+    - name: Shop page through HAProxy
       ansible.builtin.uri:
-        url: "{{ shop_url }}/healthz.txt"
-        return_content: true
-      register: fe
-      failed_when: fe.status != 200 or 'ok' not in fe.content
+        url: "{{ base }}/"
+      register: page
+      until: page.status == 200
+      retries: 10
+      delay: 3
 
-    - name: Create account
+    - name: Products
       ansible.builtin.uri:
-        url: "{{ shop_url }}/api/account"
-        method: POST
-        body_format: json
-        body:
-          username: "{{ unique }}"
-          password: "SmokePass1!"
-          email: "{{ unique }}@lab.rippa.io"
-        status_code: [200, 409]
-
-    - name: Login
-      ansible.builtin.uri:
-        url: "{{ shop_url }}/api/login"
-        method: POST
-        body_format: json
-        body:
-          username: "{{ unique }}"
-          password: "SmokePass1!"
-        status_code: 200
-      register: login
-
-    - name: List products (three seeded, admins may add more)
-      ansible.builtin.uri:
-        url: "{{ shop_url }}/api/cart/products"
+        url: "{{ base }}/api/cart/products"
       register: products
       failed_when: products.json | length < 3
 
+    - name: Admin login
+      ansible.builtin.uri:
+        url: "{{ base }}/api/login"
+        method: POST
+        body_format: json
+        body: { username: "{{ admin_users[0] }}", password: "{{ lab_password }}" }
+      register: admin_login
+      no_log: true
+
+    - name: Admin API recognises the admin
+      ansible.builtin.uri:
+        url: "{{ base }}/api/admin/me"
+        headers: { Authorization: "Bearer {{ admin_login.json.token }}" }
+
     - name: Logout
       ansible.builtin.uri:
-        url: "{{ shop_url }}/api/logout"
+        url: "{{ base }}/api/logout"
         method: POST
-        headers:
-          Authorization: "Bearer {{ login.json.token }}"
-        status_code: 200
+        headers: { Authorization: "Bearer {{ admin_login.json.token }}" }
 
-    - name: Stats from web-frontend1
+    - name: Every HAProxy server is UP
+      ansible.builtin.shell: |
+        echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+          | awk -F, 'NR>1 && $2!="FRONTEND" && $2!="BACKEND" && $1!="stats" && $18 !~ /^UP/ {print $1"/"$2" "$18}'
+      register: hp_down
+      until: hp_down.stdout == ''
+      retries: 10
+      delay: 3
+      changed_when: false
+
+    - name: Exporter sees Galera synced and LDAP up on both nodes
+      ansible.builtin.shell: |
+        curl -s 127.0.0.1:9200/metrics | grep -E '^webstore_(galera_synced|ldap_up|haproxy_up)' | grep -v ' 1.0$' || true
+      register: mon_bad
+      until: mon_bad.stdout == ''
+      retries: 10
+      delay: 6
+      changed_when: false
+
+    - name: Grafana
       ansible.builtin.uri:
-        url: http://web-frontend1.lab.rippa.io:8014/api/stats/logged-in
-      register: s1
+        url: "http://127.0.0.1:{{ grafana_port }}/api/health"
 
-    - name: Stats from web-frontend2
-      ansible.builtin.uri:
-        url: http://web-frontend2.lab.rippa.io:8014/api/stats/logged-in
-      register: s2
-
-    - name: Show logged-in counts
+    - name: Where to look
       ansible.builtin.debug:
         msg:
-          - "web-frontend1 count={{ s1.json.count }}"
-          - "web-frontend2 count={{ s2.json.count }}"
+          - "Shop:          {{ shop_url }}/   ({{ shop_vip_ip }})"
+          - "Admin:         {{ shop_url }}/admin.html   (admin / lab_password)"
+          - "HAProxy stats: http://{{ ops_ip }}:{{ haproxy_stats_port }}/"
+          - "Grafana:       http://{{ ops_ip }}:{{ grafana_port }}/   (admin / lab_password)"

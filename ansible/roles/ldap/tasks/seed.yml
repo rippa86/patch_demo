@@ -1,0 +1,34 @@
+---
+- name: Service account, admin users and the api ACI
+  ansible.builtin.shell: |
+    set -e
+    S() { ldapsearch -x -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$LDAP_PW" "$@"; }
+    A() { ldapadd -x -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$LDAP_PW" >/dev/null; }
+    M() { ldapmodify -x -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$LDAP_PW" >/dev/null; }
+    person() {  # $1 = dn, $2 = uid, $3 = sn
+      S -b "$1" -s base dn >/dev/null 2>&1 && return 0
+      printf 'dn: %s\nobjectClass: inetOrgPerson\nobjectClass: organizationalPerson\nobjectClass: person\nobjectClass: top\nuid: %s\ncn: %s\nsn: %s\nmail: %s@{{ lab_domain }}\n' \
+        "$1" "$2" "$2" "$3" "$2" | A
+      echo "added $1"
+    }
+    password() {  # $1 = dn: set to lab_password unless it already binds
+      ldapwhoami -x -H ldap://127.0.0.1:389 -D "$1" -w "$LDAP_PW" >/dev/null 2>&1 && return 0
+      # Plain modify: 389-ds refuses the password-modify exop without TLS.
+      printf 'dn: %s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n' "$1" "$LDAP_PW" | M
+      echo "password set $1"
+    }
+    person "{{ ldap_service_dn }}" api "api service account"
+    password "{{ ldap_service_dn }}"
+    {% for u in admin_users %}
+    person "uid={{ u }},{{ ldap_people_ou }}" "{{ u }}" "Shop administrator"
+    password "uid={{ u }},{{ ldap_people_ou }}"
+    {% endfor %}
+    if ! S -b "{{ ldap_people_ou }}" -s base aci | grep -q 'api can manage people'; then
+      printf 'dn: %s\nchangetype: modify\nadd: aci\naci: (targetattr="*")(version 3.0; acl "api can manage people"; allow (add,delete,write,read,search,compare) userdn="ldap:///%s";)\n' \
+        "{{ ldap_people_ou }}" "{{ ldap_service_dn }}" | M
+      echo "added aci"
+    fi
+  environment:
+    LDAP_PW: "{{ lab_password }}"
+  register: ldap_seed
+  changed_when: ldap_seed.stdout | length > 0

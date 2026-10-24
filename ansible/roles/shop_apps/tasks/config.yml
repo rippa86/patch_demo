@@ -1,0 +1,71 @@
+---
+# Env file, container units and images. Nothing is (re)started here; start.yml
+# does that after the Galera cluster is up.
+
+- name: webstore.env (all secrets from lab_password)
+  ansible.builtin.template:
+    src: webstore.env.j2
+    dest: /etc/webstore/webstore.env
+    mode: "0600"
+  register: shop_env
+  no_log: true
+
+- name: Direct-access API proxy for httpd
+  ansible.builtin.template:
+    src: api-proxy.conf.j2
+    dest: /etc/webstore/api-proxy.conf
+    mode: "0644"
+  register: shop_api_proxy
+
+- name: Container units from the repo
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/deploy/quadlets/{{ item }}"
+    dest: /etc/containers/systemd/{{ item }}
+    mode: "0644"
+  loop:
+    - webstore-net.network
+    - webstore-mariadb-data.volume
+    - webstore-mariadb.container
+    - webstore-backend.container
+    - webstore-api-account.container
+    - webstore-api-login.container
+    - webstore-api-logout.container
+    - webstore-api-cart.container
+    - webstore-api-stats.container
+    - webstore-api-admin.container
+  register: shop_units
+
+- name: httpd unit
+  ansible.builtin.template:
+    src: webstore-httpd.container.j2
+    dest: /etc/containers/systemd/webstore-httpd.container
+    mode: "0644"
+  register: shop_httpd_unit
+
+- name: Reload systemd (regenerates units from quadlets)
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: shop_units is changed or shop_httpd_unit is changed
+
+- name: Build images (only rebuilt layers change the image)
+  ansible.builtin.shell: |
+    set -e
+    tag="localhost/webstore-{{ item.key }}:1.0"
+    before=$(podman image inspect --format '{{ '{{' }}.Id{{ '}}' }}' "$tag" 2>/dev/null || true)
+    podman build -q -t "$tag" "{{ repo_dest }}/{{ item.value }}" >/dev/null
+    after=$(podman image inspect --format '{{ '{{' }}.Id{{ '}}' }}' "$tag")
+    [ "$before" = "$after" ] && echo same || echo new
+  loop: "{{ shop_images | dict2items }}"
+  register: shop_builds
+  changed_when: shop_builds.stdout == 'new'
+
+- name: Work out which services need a restart
+  ansible.builtin.set_fact:
+    shop_restart_units: >-
+      {{ (shop_builds.results | selectattr('changed') | map(attribute='item.key')
+          | map('regex_replace', '^(.*)$', 'webstore-\1.service') | list)
+         + (shop_units.results | selectattr('changed') | map(attribute='item')
+            | select('match', '.*\.container$')
+            | map('regex_replace', '\.container$', '.service') | list)
+         + (['webstore-httpd.service'] if (shop_httpd_unit is changed or shop_api_proxy is changed) else [])
+         + ((shop_api_units + ['webstore-backend.service']) if shop_env is changed else []) }}

@@ -1,1 +1,3 @@
-ansible_host: 10.10.4.108
+ansible_host: "{{ ops_ip }}"
+node_ip: "{{ ops_ip }}"
+node_name: "{{ ops_name }}"

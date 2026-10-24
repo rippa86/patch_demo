@@ -1,0 +1,66 @@
+---
+- name: HAProxy package
+  ansible.builtin.dnf:
+    name: haproxy
+    state: present
+
+# --- Shop address: a second IP on demo-vm's main interface -----------------
+- name: NetworkManager connection on the default interface
+  ansible.builtin.command: nmcli -g GENERAL.CONNECTION device show {{ ansible_default_ipv4.interface }}
+  register: nm_conn
+  changed_when: false
+
+- name: Add {{ shop_vip_ip }}/{{ lab_prefix }} to that connection
+  ansible.builtin.shell: |
+    set -e
+    con="{{ nm_conn.stdout | trim }}"
+    if nmcli -g ipv4.addresses connection show "$con" | tr ',' '\n' | grep -qx ' *{{ shop_vip_ip }}/{{ lab_prefix }}'; then
+      echo present
+    else
+      nmcli connection modify "$con" +ipv4.addresses {{ shop_vip_ip }}/{{ lab_prefix }}
+      echo added
+    fi
+  register: vip_conn
+  changed_when: vip_conn.stdout == 'added'
+
+- name: Apply the address now (without bouncing the link)
+  ansible.builtin.command: nmcli device reapply {{ ansible_default_ipv4.interface }}
+  when: vip_conn is changed
+
+- name: Wait until the address is live
+  ansible.builtin.shell: ip -4 -o addr show | grep -q ' {{ shop_vip_ip }}/'
+  register: vip_live
+  until: vip_live.rc == 0
+  retries: 10
+  delay: 2
+  changed_when: false
+
+# --- HAProxy -------------------------------------------------------------------
+- name: Let HAProxy connect to the shop ports (SELinux)
+  ansible.builtin.shell: |
+    if getsebool haproxy_connect_any | grep -q ' on$'; then echo on; else setsebool -P haproxy_connect_any 1; echo set; fi
+  register: hp_sebool
+  changed_when: hp_sebool.stdout == 'set'
+
+- name: Remove the old MariaDB-over-HAProxy snippet (earlier manual Grafana setup)
+  ansible.builtin.file:
+    path: /etc/haproxy/conf.d/mariadb.cfg
+    state: absent
+  notify: Reload haproxy
+
+- name: haproxy.cfg
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    mode: "0644"
+    validate: haproxy -c -f %s
+  notify: Reload haproxy
+
+- name: HAProxy running
+  ansible.builtin.systemd:
+    name: haproxy
+    state: started
+    enabled: true
+
+- name: Apply config changes now
+  ansible.builtin.meta: flush_handlers

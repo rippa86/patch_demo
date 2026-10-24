@@ -1,3 +1,4 @@
+# Managed by Ansible (roles/ldap). Used once by dscreate.
 [general]
 config_version = 2
 full_machine_name = {{ inventory_hostname }}
@@ -9,9 +10,10 @@ instance_name = webstore
 port = 389
 secure_port = 636
 root_dn = cn=Directory Manager
-root_password = {{ ldap_manager_password }}
+root_password = {{ lab_password }}
 self_sign_cert = true
 
 [backend-userroot]
-suffix = dc=webstore,dc=local
+suffix = {{ ldap_suffix }}
 sample_entries = no
+create_suffix_entry = true

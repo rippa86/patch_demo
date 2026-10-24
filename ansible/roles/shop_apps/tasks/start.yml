@@ -1,0 +1,38 @@
+---
+# Start (or restart if their image/unit/env changed) in dependency order,
+# waiting for each health check.
+
+- name: Backend
+  ansible.builtin.systemd:
+    name: webstore-backend.service
+    state: "{{ 'restarted' if 'webstore-backend.service' in shop_restart_units | default([]) else 'started' }}"
+
+- name: Wait for backend (MariaDB Synced)
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8001/healthz
+  register: be_health
+  until: be_health.status == 200
+  retries: 30
+  delay: 4
+
+- name: APIs and httpd
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: "{{ 'restarted' if item in shop_restart_units | default([]) else 'started' }}"
+  loop: "{{ shop_api_units + ['webstore-httpd.service'] }}"
+
+- name: Wait for every service's health check
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ item }}"
+  loop:
+    - 8080/healthz.txt
+    - 8010/healthz
+    - 8011/healthz
+    - 8012/healthz
+    - 8013/healthz
+    - 8014/healthz
+    - 8015/healthz
+  register: svc_health
+  until: svc_health.status == 200
+  retries: 30
+  delay: 3
