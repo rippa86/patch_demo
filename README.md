@@ -109,6 +109,36 @@ INSERT INTO webstore.admins (uid) VALUES ('alice');
 DELETE FROM webstore.admins WHERE uid = 'alice';
 ```
 
+## Database maintenance on one node
+
+`playbooks/maintenance-db.yml` takes one frontend's MariaDB out of service and back, with a check
+after every step. Choose steps with true/false switches; they always run in this order:
+
+| Switch | What it does | Refuses when |
+| --- | --- | --- |
+| `switch_primary` | Drains the target in HAProxy (then MAINT) and makes its DB read-only, so all writes go to the other node. TVT pushes real writes through the shop and checks they landed on the peer and **none** on the target. | the peer isn't Primary + Synced and UP in HAProxy |
+| `shutdown_db_service` | Stops the target's backend and MariaDB (clean Galera leave); checks the peer still has quorum; prints the saved `seqno`. | the target is still in HAProxy, or the peer isn't healthy |
+| `start_db_service` | Clears stale SST files, starts MariaDB, waits until Synced (IST/SST), starts backend/APIs/httpd and health-checks them. | the peer isn't Primary |
+| `restore_traffic` | Makes the target writable and puts it back into HAProxy; waits until UP everywhere. | the target isn't Synced |
+| `database_tvt` | Shop pages, admin login, real writes, Galera state on every running node, cluster size (incl. garbd), data checksums across nodes. | n/a (fails on any problem) |
+
+```bash
+cd ansible
+# take web-frontend1's database down
+ansible-playbook playbooks/maintenance-db.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io \
+  -e switch_primary=true -e shutdown_db_service=true -e database_tvt=true
+
+# ...maintenance...
+
+# bring it back into service
+ansible-playbook playbooks/maintenance-db.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io \
+  -e start_db_service=true -e restore_traffic=true -e database_tvt=true
+```
+
+Galera has no fixed primary: both nodes accept writes, and each frontend writes to its own MariaDB.
+"Primary" here means the only node receiving traffic; the TVT proves it from the write counters.
+The TVT uses a `tvtcheck` shop account (created on first run, password = lab_password).
+
 ## Drain one shop host
 
 Bleed connections off a node in HAProxy, then stop its services; the other node and garbd keep

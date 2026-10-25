@@ -1,0 +1,24 @@
+---
+# Read Galera state from one shop node into gs[node] (on the host running the play).
+# vars: node = inventory hostname of a shop node
+- name: "Galera status: {{ node }}"
+  ansible.builtin.shell: |
+    podman exec webstore-mariadb mariadb -uroot -p"$PW" -Nse "
+      SHOW GLOBAL STATUS WHERE Variable_name IN
+        ('wsrep_cluster_size','wsrep_cluster_status','wsrep_local_state_comment',
+         'wsrep_ready','wsrep_replicated','wsrep_last_committed');
+      SELECT 'read_only', @@global.read_only;" 2>/dev/null
+  environment:
+    PW: "{{ lab_password }}"
+  delegate_to: "{{ node }}"
+  register: _gstat
+  changed_when: false
+  failed_when: false
+
+- name: "Record {{ node }}"
+  ansible.builtin.set_fact:
+    gs: >-
+      {% set d = {'up': _gstat.rc == 0 and _gstat.stdout | length > 0} %}
+      {%- if d.up %}{% for line in _gstat.stdout_lines %}{% set p = line.split() %}
+      {%- if p | length == 2 %}{% set _ = d.update({p[0]: p[1]}) %}{% endif %}{% endfor %}{% endif %}
+      {{- gs | default({}) | combine({node: d}) }}

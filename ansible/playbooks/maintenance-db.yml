@@ -1,0 +1,318 @@
+---
+# MariaDB maintenance for ONE shop node. Pick the steps with true/false switches;
+# they always run in this order:
+#
+#   switch_primary       Move all writes to the other node: drain + maint the target in HAProxy,
+#                        set the target's MariaDB read-only, then TVT that writes really land on
+#                        the other node and none on the target.
+#   shutdown_db_service  Cleanly stop MariaDB (and its backend) on the target. Refuses unless the
+#                        target is already out of HAProxy and the other node is Primary + Synced.
+#   start_db_service     Start MariaDB on the target, wait until it has resynced (IST/SST), then
+#                        start its backend, APIs and httpd and health-check them.
+#   restore_traffic      Make the target writable again and put it back into HAProxy.
+#   database_tvt         Site + database test: pages, logins, real writes, Galera state, checksums.
+#
+# Examples (from ansible/):
+#   # take web-frontend1's database down for maintenance
+#   ansible-playbook playbooks/maintenance-db.yml -e target=web-frontend1.lab.rippa.io \
+#     -e switch_primary=true -e shutdown_db_service=true -e database_tvt=true -e lab_password=...
+#
+#   # bring it back and return it to service
+#   ansible-playbook playbooks/maintenance-db.yml -e target=web-frontend1.lab.rippa.io \
+#     -e start_db_service=true -e restore_traffic=true -e database_tvt=true -e lab_password=...
+#
+#   # just test the site
+#   ansible-playbook playbooks/maintenance-db.yml -e target=web-frontend1.lab.rippa.io -e database_tvt=true -e lab_password=...
+
+- name: MariaDB maintenance on {{ target | default('(set -e target=...)') }}
+  hosts: webstore_ops
+  become: true
+  gather_facts: false
+  vars:
+    do_switch: "{{ switch_primary | default(false) | bool }}"
+    do_shutdown: "{{ shutdown_db_service | default(false) | bool }}"
+    do_start: "{{ start_db_service | default(false) | bool }}"
+    do_restore: "{{ restore_traffic | default(false) | bool }}"
+    do_tvt: "{{ database_tvt | default(false) | bool }}"
+    peer: "{{ groups['webstore_shop'] | difference([target]) | first }}"
+    target_name: "{{ hostvars[target].node_name }}"
+    peer_name: "{{ hostvars[peer].node_name }}"
+    tvt_base: "http://{{ shop_vip_ip }}"
+    tvt_user: tvtcheck
+
+  pre_tasks:
+    - name: Check the inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - target in groups['webstore_shop']
+          - lab_password is defined
+          - do_switch or do_shutdown or do_start or do_restore or do_tvt
+        fail_msg: >-
+          Use -e target=<{{ groups['webstore_shop'] | join('|') }}> -e lab_password=...
+          and at least one of switch_primary / shutdown_db_service / start_db_service /
+          restore_traffic / database_tvt = true
+
+    - name: Current Galera state
+      ansible.builtin.include_role:
+        name: db_maint
+        tasks_from: galera_status
+      loop: "{{ groups['webstore_shop'] }}"
+      loop_control: { loop_var: node }
+
+    - name: Current HAProxy state
+      ansible.builtin.include_role:
+        name: db_maint
+        tasks_from: haproxy_status
+      loop: ["{{ target_name }}", "{{ peer_name }}"]
+      loop_control: { loop_var: server }
+
+    - name: Plan
+      ansible.builtin.debug:
+        msg:
+          - "Target: {{ target_name }}  (DB {{ 'up, ' ~ gs[target].wsrep_local_state_comment | default('?') ~ ', read_only=' ~ gs[target].read_only | default('?') if gs[target].up else 'DOWN' }}; HAProxy web: {{ hp[target_name].web_pool | default('?') }})"
+          - "Peer:   {{ peer_name }}  (DB {{ 'up, ' ~ gs[peer].wsrep_local_state_comment | default('?') if gs[peer].up else 'DOWN' }}; HAProxy web: {{ hp[peer_name].web_pool | default('?') }})"
+          - "Steps:  {{ [('switch_primary', do_switch), ('shutdown_db_service', do_shutdown), ('start_db_service', do_start), ('restore_traffic', do_restore), ('database_tvt', do_tvt)] | selectattr('1') | map(attribute='0') | join(' -> ') }}"
+
+  tasks:
+    # ------------------------------------------------------------------ switch_primary
+    - name: Switch writes to {{ peer_name }}
+      when: do_switch
+      block:
+        - name: The peer must be healthy before it takes all the traffic
+          ansible.builtin.assert:
+            that:
+              - gs[peer].up
+              - gs[peer].wsrep_cluster_status == 'Primary'
+              - gs[peer].wsrep_local_state_comment == 'Synced'
+              - hp[peer_name].values() | reject('match', '^UP') | list | length == 0
+            fail_msg: "{{ peer_name }} is not ready to take over. DB: {{ gs[peer] }}  HAProxy: {{ hp[peer_name] }}"
+
+        - name: Drain {{ target_name }} in every HAProxy backend
+          ansible.builtin.include_role:
+            name: haproxy_state
+          vars:
+            haproxy_server: "{{ target_name }}"
+            haproxy_state: drain
+
+        - name: Wait for its open connections to finish
+          ansible.builtin.shell: |
+            echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+              | awk -F, -v n="{{ target_name }}" 'NR > 1 && $2 == n { c += $5 } END { print c + 0 }'
+          register: _scur
+          until: _scur.stdout | int == 0
+          retries: 30
+          delay: 2
+          changed_when: false
+
+        - name: Maintenance mode for {{ target_name }}
+          ansible.builtin.include_role:
+            name: haproxy_state
+          vars:
+            haproxy_server: "{{ target_name }}"
+            haproxy_state: maint
+
+        - name: Make {{ target_name }}'s database read-only (Galera replication still applies)
+          ansible.builtin.shell: |
+            podman exec webstore-mariadb mariadb -uroot -p"$PW" -e "SET GLOBAL read_only = ON"
+          environment:
+            PW: "{{ lab_password }}"
+          delegate_to: "{{ target }}"
+          when: gs[target].up
+
+        - name: "TVT: push writes through the shop"
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: write_probe
+          vars:
+            db_nodes_up: "{{ [target, peer] if gs[target].up else [peer] }}"
+
+        - name: "TVT: HAProxy state after the switch"
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: haproxy_status
+          loop: ["{{ target_name }}", "{{ peer_name }}"]
+          loop_control: { loop_var: server }
+
+        - name: "TVT: {{ peer_name }} is now the primary (only) writer"
+          ansible.builtin.assert:
+            that:
+              - hp[target_name].values() | reject('match', '^MAINT') | list | length == 0
+              - hp[peer_name].values() | reject('match', '^UP') | list | length == 0
+              - probe_delta[peer] > 0
+              - probe_delta[target] | default(0) == 0
+              - gs[peer].read_only == '0'
+              - (gs[target].read_only | default('1')) == '1'
+            fail_msg: >-
+              Switch not confirmed. HAProxy {{ target_name }}={{ hp[target_name] }} {{ peer_name }}={{ hp[peer_name] }};
+              writes during test={{ probe_delta }}; read_only target={{ gs[target].read_only | default('n/a') }} peer={{ gs[peer].read_only }}
+
+        - name: Switch done
+          ansible.builtin.debug:
+            msg: "PASS - {{ peer_name }} is primary: it took {{ probe_delta[peer] }} write-sets, {{ target_name }} took 0 and is read-only + MAINT."
+
+    # ------------------------------------------------------------------ shutdown_db_service
+    - name: Shut down MariaDB on {{ target_name }}
+      when: do_shutdown
+      block:
+        - name: Refresh Galera state
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: galera_status
+          loop: "{{ groups['webstore_shop'] }}"
+          loop_control: { loop_var: node }
+
+        - name: Refresh HAProxy state
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: haproxy_status
+          vars:
+            server: "{{ target_name }}"
+
+        - name: Only stop it once traffic has been moved away
+          ansible.builtin.assert:
+            that:
+              - hp[target_name].values() | reject('match', '^MAINT') | list | length == 0
+            fail_msg: >-
+              {{ target_name }} is still in service in HAProxy ({{ hp[target_name] }}).
+              Run with -e switch_primary=true first (or in the same run).
+
+        - name: The peer must keep the cluster alive
+          ansible.builtin.assert:
+            that:
+              - gs[peer].up
+              - gs[peer].wsrep_cluster_status == 'Primary'
+              - gs[peer].wsrep_local_state_comment == 'Synced'
+            fail_msg: "Stopping {{ target_name }} now would leave no healthy database: {{ gs[peer] }}"
+
+        - name: Remember the cluster size
+          ansible.builtin.set_fact:
+            _size_before: "{{ gs[peer].wsrep_cluster_size | int }}"
+
+        - name: Stop the backend, then MariaDB, on {{ target_name }} (clean Galera leave)
+          ansible.builtin.systemd:
+            name: "{{ item }}"
+            state: stopped
+          loop: [webstore-backend.service, webstore-mariadb.service]
+          delegate_to: "{{ target }}"
+
+        - name: "TVT: {{ peer_name }} still has quorum without {{ target_name }}"
+          ansible.builtin.shell: |
+            podman exec webstore-mariadb mariadb -uroot -p"$PW" -Nse \
+              "SHOW STATUS WHERE Variable_name IN ('wsrep_cluster_size','wsrep_cluster_status','wsrep_local_state_comment')" 2>/dev/null
+          environment:
+            PW: "{{ lab_password }}"
+          delegate_to: "{{ peer }}"
+          register: _after_stop
+          until: >-
+            'Primary' in _after_stop.stdout and 'Synced' in _after_stop.stdout
+            and ('wsrep_cluster_size\t' ~ (_size_before | int - 1)) in _after_stop.stdout
+          retries: 12
+          delay: 5
+          changed_when: false
+
+        - name: Saved position of {{ target_name }} (it will resync from here)
+          ansible.builtin.shell: |
+            mp=$(podman volume inspect webstore-mariadb-data --format '{{ '{{' }}.Mountpoint{{ '}}' }}')
+            grep -E '^(seqno|safe_to_bootstrap):' "$mp/grastate.dat" | paste -sd' '
+          delegate_to: "{{ target }}"
+          register: _grastate
+          changed_when: false
+
+        - name: Shutdown done
+          ansible.builtin.debug:
+            msg:
+              - "PASS - MariaDB on {{ target_name }} is stopped; nothing can write to it."
+              - "{{ peer_name }} is Primary with {{ _size_before | int - 1 }} members ({{ peer_name }} + garbd)."
+              - "{{ target_name }} grastate: {{ _grastate.stdout }}"
+
+    # ------------------------------------------------------------------ start_db_service
+    - name: Start MariaDB on {{ target_name }} and resync
+      when: do_start
+      block:
+        - name: The peer must be up to act as donor
+          ansible.builtin.assert:
+            that:
+              - gs[peer].up
+              - gs[peer].wsrep_cluster_status == 'Primary'
+            fail_msg: "{{ peer_name }} is not Primary, {{ target_name }} has nothing to join: {{ gs[peer] }}"
+
+        - name: Start and resync
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: start_node
+
+        - name: Refresh Galera state
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: galera_status
+          loop: "{{ groups['webstore_shop'] }}"
+          loop_control: { loop_var: node }
+
+        - name: "TVT: both nodes Synced in one cluster"
+          ansible.builtin.assert:
+            that:
+              - gs[target].wsrep_local_state_comment == 'Synced'
+              - gs[peer].wsrep_local_state_comment == 'Synced'
+              - gs[target].wsrep_cluster_size == gs[peer].wsrep_cluster_size
+              - gs[peer].wsrep_cluster_size | int == 3
+            fail_msg: "target={{ gs[target] }} peer={{ gs[peer] }}"
+
+        - name: Start done
+          ansible.builtin.debug:
+            msg:
+              - "PASS - {{ target_name }} is Synced (cluster size {{ gs[peer].wsrep_cluster_size }})."
+              - "{{ 'It is still out of HAProxy; add -e restore_traffic=true to put it back.' if not do_restore else 'Returning it to service next.' }}"
+
+    # ------------------------------------------------------------------ restore_traffic
+    - name: Return {{ target_name }} to service
+      when: do_restore
+      block:
+        - name: Refresh Galera state
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: galera_status
+          vars:
+            node: "{{ target }}"
+
+        - name: Only if its database is Synced
+          ansible.builtin.assert:
+            that:
+              - gs[target].up
+              - gs[target].wsrep_local_state_comment == 'Synced'
+            fail_msg: "{{ target_name }} is not Synced yet ({{ gs[target] }}). Run start_db_service first."
+
+        - name: Make {{ target_name }} writable again
+          ansible.builtin.shell: |
+            podman exec webstore-mariadb mariadb -uroot -p"$PW" -e "SET GLOBAL read_only = OFF"
+          environment:
+            PW: "{{ lab_password }}"
+          delegate_to: "{{ target }}"
+
+        - name: Back into HAProxy
+          ansible.builtin.include_role:
+            name: haproxy_state
+          vars:
+            haproxy_server: "{{ target_name }}"
+            haproxy_state: ready
+
+        - name: Wait until HAProxy health checks pass in every backend
+          ansible.builtin.shell: |
+            echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+              | awk -F, -v n="{{ target_name }}" 'NR>1 && $2==n && $18 !~ /^UP/ {print $1" "$18}'
+          register: _not_up
+          until: _not_up.stdout == ''
+          retries: 20
+          delay: 3
+          changed_when: false
+
+        - name: Restore done
+          ansible.builtin.debug:
+            msg: "PASS - {{ target_name }} is writable and UP in every HAProxy backend."
+
+    # ------------------------------------------------------------------ database_tvt
+    - name: Site and database TVT
+      ansible.builtin.include_role:
+        name: db_maint
+        tasks_from: site_tvt
+      when: do_tvt

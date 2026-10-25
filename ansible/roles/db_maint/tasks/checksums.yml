@@ -1,0 +1,16 @@
+---
+# db_checksums = {node: "products,admins"} for every running DB node
+- name: Table checksums
+  ansible.builtin.shell: |
+    podman exec webstore-mariadb mariadb -uroot -p"$PW" -Nse \
+      "CHECKSUM TABLE webstore.products, webstore.admins" 2>/dev/null | awk '{print $2}' | paste -sd,
+  environment:
+    PW: "{{ lab_password }}"
+  delegate_to: "{{ item }}"
+  loop: "{{ db_nodes_up }}"
+  register: _sums
+  changed_when: false
+
+- name: Record
+  ansible.builtin.set_fact:
+    db_checksums: "{{ dict(db_nodes_up | zip(_sums.results | map(attribute='stdout'))) }}"

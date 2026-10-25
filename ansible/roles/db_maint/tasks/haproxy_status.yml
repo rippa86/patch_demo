@@ -1,0 +1,16 @@
+---
+# HAProxy state of one shop node in every backend -> hp[server_name] = {backend: status}
+# vars: server = HAProxy server name (e.g. web-frontend1). Runs on demo-vm.
+- name: "HAProxy state of {{ server }}"
+  ansible.builtin.shell: |
+    echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+      | awk -F, -v s="{{ server }}" 'NR>1 && $2==s {print $1" "$18}'
+  register: _hp
+  changed_when: false
+
+- name: "Record {{ server }}"
+  ansible.builtin.set_fact:
+    hp: >-
+      {% set d = {} %}{% for line in _hp.stdout_lines %}{% set p = line.split(' ', 1) %}
+      {%- if p | length == 2 %}{% set _ = d.update({p[0]: p[1]}) %}{% endif %}{% endfor %}
+      {{- hp | default({}) | combine({server: d}) }}
