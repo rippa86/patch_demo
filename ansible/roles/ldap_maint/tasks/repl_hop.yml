@@ -1,0 +1,33 @@
+---
+# item.0 = writer node, item.1 = reader node
+- name: "Write marker on {{ item.0 }}"
+  ansible.builtin.shell: |
+    printf 'dn: %s\nchangetype: modify\nreplace: description\ndescription: %s\n' \
+      "uid={{ tvt_user }},{{ ldap_people_ou }}" "{{ _marker }}-{{ item.0 }}" \
+      | ldapmodify -x -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$PW" >/dev/null
+  environment:
+    PW: "{{ lab_password }}"
+  delegate_to: "{{ item.0 }}"
+  changed_when: false
+
+- name: "Wait for it to replicate to {{ item.1 }}"
+  ansible.builtin.shell: |
+    ldapsearch -x -LLL -H ldap://127.0.0.1:389 -D "cn=Directory Manager" -w "$PW" \
+      -b "uid={{ tvt_user }},{{ ldap_people_ou }}" -s base description 2>/dev/null | sed -n 's/^description: //p'
+  environment:
+    PW: "{{ lab_password }}"
+  delegate_to: "{{ item.1 }}"
+  register: _seen
+  until: _seen.stdout == _marker ~ '-' ~ item.0
+  retries: 20
+  delay: 3
+  changed_when: false
+  failed_when: false
+
+- name: "Replication {{ hostvars[item.0].node_name }} -> {{ hostvars[item.1].node_name }} works"
+  ansible.builtin.assert:
+    that: _seen.stdout == _marker ~ '-' ~ item.0
+    fail_msg: >-
+      A change written on {{ hostvars[item.0].node_name }} did not reach {{ hostvars[item.1].node_name }}
+      within 60s (it still shows '{{ _seen.stdout }}'). Check the agreement on {{ hostvars[item.0].node_name }}:
+      dsconf webstore repl-agmt status --suffix {{ ldap_suffix }} meToPeer

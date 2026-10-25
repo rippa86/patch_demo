@@ -163,6 +163,25 @@ ansible-playbook playbooks/maintenance-haproxy.yml -e target=web-frontend1.lab.r
 ansible-playbook playbooks/maintenance-haproxy.yml -e target=web-frontend1.lab.rippa.io -e restore_haproxy=true
 ```
 
+## LDAP maintenance on one node
+
+`playbooks/maintenance-ldap.yml` stops and starts 389-ds on one frontend. Each node's login and
+account APIs fall back to the other node's LDAP (`LDAP_PEER_URL`), so the shop keeps working.
+
+| Switch | What it does | Refuses when |
+| --- | --- | --- |
+| `ldap_stop` | Stops `dirsrv@webstore` on the target, then logs in directly on the target's own login API and through HAProxy to prove the fallback. | the other node's LDAP isn't healthy; the target's running APIs have no `LDAP_PEER_URL` to the other node; user counts differ (override with `force_stop=true`) |
+| `ldap_start` | Starts it, checks the service account binds, then writes a change on each node and waits for it on the other (replication both ways) and compares user counts. | n/a (fails if replication doesn't catch up) |
+| `ldap_tvt` | Binds and user counts on every running directory, direct logins on both nodes, a login via HAProxy, two-way replication when both are up. | n/a |
+
+```bash
+ansible-playbook playbooks/maintenance-ldap.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io -e ldap_stop=true
+ansible-playbook playbooks/maintenance-ldap.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io -e ldap_start=true -e ldap_tvt=true
+```
+
+Changes made while one directory is down queue on the other and replay when it starts; keep
+outages well under the changelog retention (about 7 days by default).
+
 ## Drain one shop host
 
 Bleed connections off a node in HAProxy, then stop its services; the other node and garbd keep

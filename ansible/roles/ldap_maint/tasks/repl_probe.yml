@@ -1,0 +1,11 @@
+---
+# Prove replication in both directions: write a marker (description of the TVT account)
+# on one node and wait for it to appear on the other; then the reverse.
+# vars: repl_pair = [nodeA, nodeB] (both must have LDAP up)
+- name: Marker for this run
+  ansible.builtin.set_fact:
+    _marker: "tvt-{{ lookup('pipe', 'date +%s%N') }}"
+
+- name: "Write the marker on {{ item.0 }}, expect it on {{ item.1 }}"
+  ansible.builtin.include_tasks: repl_hop.yml
+  loop: "{{ [repl_pair, repl_pair | reverse | list] }}"

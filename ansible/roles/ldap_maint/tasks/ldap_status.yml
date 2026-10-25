@@ -1,0 +1,26 @@
+---
+# LDAP state of one shop node -> ls[node] = {up, bind, people}. Runs the client on the node itself.
+# vars: node = inventory hostname of a shop node
+- name: "LDAP status: {{ node }}"
+  ansible.builtin.shell: |
+    if ! systemctl is-active -q dirsrv@webstore; then echo "service=down"; exit 0; fi
+    echo "service=up"
+    if ldapwhoami -x -H ldap://127.0.0.1:389 -D "{{ ldap_service_dn }}" -w "$PW" >/dev/null 2>&1; then echo "bind=ok"; else echo "bind=fail"; fi
+    n=$(ldapsearch -x -LLL -H ldap://127.0.0.1:389 -D "{{ ldap_service_dn }}" -w "$PW" \
+          -b "{{ ldap_people_ou }}" -s one '(objectClass=inetOrgPerson)' 1.1 2>/dev/null | grep -c '^dn:')
+    echo "people=$n"
+  environment:
+    PW: "{{ lab_password }}"
+  delegate_to: "{{ node }}"
+  register: _ls
+  changed_when: false
+  failed_when: false
+
+- name: "Record {{ node }}"
+  ansible.builtin.set_fact:
+    ls: >-
+      {% set d = {} %}{% for line in _ls.stdout_lines %}{% set p = line.split('=', 1) %}
+      {%- if p | length == 2 %}{% set _ = d.update({p[0]: p[1]}) %}{% endif %}{% endfor %}
+      {%- set _ = d.update({'up': d.get('service') == 'up' and d.get('bind') == 'ok',
+                            'people': d.get('people', '0') | int}) %}
+      {{- ls | default({}) | combine({node: d}) }}

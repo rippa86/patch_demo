@@ -1,0 +1,264 @@
+---
+# 389 Directory Server maintenance for ONE shop node. Switches run in this order:
+#
+#   ldap_stop   Stop dirsrv@webstore on the target. Refuses unless the other node's LDAP is
+#               healthy, both directories hold the same users, and the target's login/account
+#               APIs are configured to fall back to the other node's LDAP. Afterwards it logs
+#               in directly on the target's own login API to prove the fallback works.
+#   ldap_start  Start it again, check binds, then prove replication in BOTH directions
+#               (a change written on each node appears on the other).
+#   ldap_tvt    Directory health on every running node, user counts match, direct logins on
+#               both nodes, a login through HAProxy, and two-way replication if both are up.
+#
+# Examples (from ansible/):
+#   ansible-playbook playbooks/maintenance-ldap.yml -e target=web-frontend1.lab.rippa.io -e ldap_stop=true -e lab_password=...
+#   ansible-playbook playbooks/maintenance-ldap.yml -e target=web-frontend1.lab.rippa.io -e ldap_start=true -e ldap_tvt=true -e lab_password=...
+#
+# Option: -e force_stop=true skips the "same number of users" check (not the others).
+
+- name: LDAP maintenance on {{ target | default('(set -e target=...)') }}
+  hosts: webstore_ops
+  become: true
+  gather_facts: false
+  vars:
+    do_stop: "{{ ldap_stop | default(false) | bool }}"
+    do_start: "{{ ldap_start | default(false) | bool }}"
+    do_tvt: "{{ ldap_tvt | default(false) | bool }}"
+    peer: "{{ groups['webstore_shop'] | difference([target]) | first }}"
+    target_name: "{{ hostvars[target].node_name }}"
+    peer_name: "{{ hostvars[peer].node_name }}"
+    shop_base: "http://{{ shop_vip_ip }}"
+    tvt_user: tvtcheck
+
+  pre_tasks:
+    - name: Check the inventory loaded the lab settings
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: check_inventory
+
+    - name: Check the inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - target in groups['webstore_shop']
+          - lab_password is defined
+          - do_stop or do_start or do_tvt
+          - not (do_stop and do_start)
+        fail_msg: >-
+          Use -e target=<{{ groups['webstore_shop'] | join('|') }}> -e lab_password=... and
+          ldap_stop=true or ldap_start=true (not both), optionally with ldap_tvt=true
+
+    - name: Current LDAP state
+      ansible.builtin.include_role:
+        name: ldap_maint
+        tasks_from: ldap_status
+      loop: "{{ groups['webstore_shop'] }}"
+      loop_control: { loop_var: node }
+
+    - name: Plan
+      ansible.builtin.debug:
+        msg:
+          - "{{ target_name }}: service={{ ls[target].service }} bind={{ ls[target].bind | default('-') }} users={{ ls[target].people }}"
+          - "{{ peer_name }}: service={{ ls[peer].service }} bind={{ ls[peer].bind | default('-') }} users={{ ls[peer].people }}"
+          - "Steps: {{ [('ldap_stop', do_stop), ('ldap_start', do_start), ('ldap_tvt', do_tvt)] | selectattr('1') | map(attribute='0') | join(' -> ') }}"
+
+    - name: TVT account exists (used for login and replication tests)
+      ansible.builtin.uri:
+        url: "{{ shop_base }}/api/account"
+        method: POST
+        body_format: json
+        body: { username: "{{ tvt_user }}", password: "{{ lab_password }}", email: "{{ tvt_user }}@{{ lab_domain }}" }
+        status_code: [200, 409]
+      no_log: true
+      when: ls[target].up or ls[peer].up
+
+  tasks:
+    # ------------------------------------------------------------------ ldap_stop
+    - name: Stop LDAP on {{ target_name }}
+      when: do_stop
+      block:
+        - name: "{{ peer_name }}'s LDAP must be healthy (it serves both nodes while {{ target_name }} is down)"
+          ansible.builtin.assert:
+            that: ls[peer].up
+            fail_msg: "{{ peer_name }} LDAP is not usable: {{ ls[peer] }}. Stopping {{ target_name }} would break logins."
+
+        - name: Both directories must hold the same users (replication caught up)
+          ansible.builtin.assert:
+            that: not ls[target].up or ls[target].people == ls[peer].people
+            fail_msg: >-
+              {{ target_name }} has {{ ls[target].people }} users, {{ peer_name }} has {{ ls[peer].people }}.
+              Replication is behind; wait and retry, or add -e force_stop=true.
+          when: not (force_stop | default(false) | bool)
+
+        - name: The target's APIs must be able to use {{ peer_name }}'s LDAP
+          ansible.builtin.include_role:
+            name: ldap_maint
+            tasks_from: fallback_check
+
+        - name: Stop dirsrv@webstore on {{ target_name }}
+          ansible.builtin.systemd:
+            name: dirsrv@webstore
+            state: stopped
+          delegate_to: "{{ target }}"
+
+        - name: Confirm port 389 is closed on {{ target_name }}
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: "{{ hostvars[target].ldap_port | default(ldap_port) }}"
+            state: stopped
+            timeout: 30
+          delegate_to: "{{ target }}"
+
+        - name: "TVT: {{ target_name }}'s account and login APIs are still healthy (using {{ peer_name }}'s LDAP)"
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ item }}/healthz"
+          loop: [8010, 8011]
+          delegate_to: "{{ target }}"
+          register: _h
+          until: _h.status == 200
+          retries: 5
+          delay: 2
+
+        - name: "TVT: a real login on {{ target_name }}'s own login API"
+          ansible.builtin.include_role:
+            name: ldap_maint
+            tasks_from: login_check
+          vars:
+            login_node: "{{ target }}"
+
+        - name: "TVT: a login through HAProxy"
+          ansible.builtin.uri:
+            url: "{{ shop_base }}/api/login"
+            method: POST
+            body_format: json
+            body: { username: "{{ tvt_user }}", password: "{{ lab_password }}" }
+          register: _via_lb
+          no_log: true
+
+        - name: Log out
+          ansible.builtin.uri:
+            url: "{{ shop_base }}/api/logout"
+            method: POST
+            headers: { Authorization: "Bearer {{ _via_lb.json.token }}" }
+
+        - name: Stopped
+          ansible.builtin.debug:
+            msg:
+              - "PASS - LDAP on {{ target_name }} is stopped; logins work on both nodes via {{ peer_name }}'s directory."
+              - "Changes made meanwhile queue on {{ peer_name }} and replicate when {{ target_name }} starts (keep it under ~7 days)."
+
+    # ------------------------------------------------------------------ ldap_start
+    - name: Start LDAP on {{ target_name }}
+      when: do_start
+      block:
+        - name: Start dirsrv@webstore on {{ target_name }}
+          ansible.builtin.systemd:
+            name: dirsrv@webstore
+            state: started
+          delegate_to: "{{ target }}"
+
+        - name: Wait for port 389
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: "{{ hostvars[target].ldap_port | default(ldap_port) }}"
+            timeout: 60
+          delegate_to: "{{ target }}"
+
+        - name: Refresh LDAP state
+          ansible.builtin.include_role:
+            name: ldap_maint
+            tasks_from: ldap_status
+          loop: "{{ groups['webstore_shop'] }}"
+          loop_control: { loop_var: node }
+
+        - name: "TVT: the service account binds on {{ target_name }}"
+          ansible.builtin.assert:
+            that: ls[target].up
+            fail_msg: "{{ target_name }} LDAP started but the api bind fails: {{ ls[target] }}"
+
+        - name: "TVT: replication in both directions"
+          ansible.builtin.include_role:
+            name: ldap_maint
+            tasks_from: repl_probe
+          vars:
+            repl_pair: ["{{ peer }}", "{{ target }}"]
+          when: ls[peer].up
+
+        - name: Refresh user counts (after catch-up)
+          ansible.builtin.include_role:
+            name: ldap_maint
+            tasks_from: ldap_status
+          loop: "{{ groups['webstore_shop'] }}"
+          loop_control: { loop_var: node }
+
+        - name: "TVT: both directories hold the same users"
+          ansible.builtin.assert:
+            that: not ls[peer].up or ls[target].people == ls[peer].people
+            fail_msg: "{{ target_name }}={{ ls[target].people }} users, {{ peer_name }}={{ ls[peer].people }}"
+
+        - name: Started
+          ansible.builtin.debug:
+            msg: "PASS - LDAP on {{ target_name }} is up, caught up ({{ ls[target].people }} users) and replicating both ways."
+
+    # ------------------------------------------------------------------ ldap_tvt
+    - name: LDAP TVT
+      when: do_tvt
+      block:
+        - name: LDAP state
+          ansible.builtin.include_role:
+            name: ldap_maint
+            tasks_from: ldap_status
+          loop: "{{ groups['webstore_shop'] }}"
+          loop_control: { loop_var: node }
+
+        - name: Nodes with LDAP up
+          ansible.builtin.set_fact:
+            ldap_up_nodes: "{{ groups['webstore_shop'] | select('in', ls | dict2items | selectattr('value.up') | map(attribute='key') | list) | list }}"
+
+        - name: "TVT: at least one directory is up"
+          ansible.builtin.assert:
+            that: ldap_up_nodes | length > 0
+            fail_msg: "No LDAP server is usable: {{ ls }}"
+
+        - name: "TVT: user counts match"
+          ansible.builtin.assert:
+            that: ldap_up_nodes | map('extract', ls) | map(attribute='people') | unique | list | length == 1
+            fail_msg: "User counts differ: {% for n in ldap_up_nodes %}{{ hostvars[n].node_name }}={{ ls[n].people }} {% endfor %}"
+
+        - name: "TVT: login directly on each node's login API"
+          ansible.builtin.include_role:
+            name: ldap_maint
+            tasks_from: login_check
+          loop: "{{ groups['webstore_shop'] }}"
+          loop_control: { loop_var: login_node }
+
+        - name: "TVT: login through HAProxy"
+          ansible.builtin.uri:
+            url: "{{ shop_base }}/api/login"
+            method: POST
+            body_format: json
+            body: { username: "{{ tvt_user }}", password: "{{ lab_password }}" }
+          register: _via_lb
+          no_log: true
+
+        - name: Log out
+          ansible.builtin.uri:
+            url: "{{ shop_base }}/api/logout"
+            method: POST
+            headers: { Authorization: "Bearer {{ _via_lb.json.token }}" }
+
+        - name: "TVT: replication in both directions"
+          ansible.builtin.include_role:
+            name: ldap_maint
+            tasks_from: repl_probe
+          vars:
+            repl_pair: "{{ groups['webstore_shop'] }}"
+          when: ldap_up_nodes | length == 2
+
+        - name: TVT result
+          ansible.builtin.debug:
+            msg:
+              - "PASS - LDAP healthy"
+              - "Directories up: {{ ldap_up_nodes | map('extract', hostvars, 'node_name') | join(', ') }} ({{ ls[ldap_up_nodes[0]].people }} users)"
+              - "Replication:    {{ 'verified both ways' if ldap_up_nodes | length == 2 else 'not tested (only one directory up)' }}"
+              - "Logins:         OK on both nodes' APIs and through HAProxy"

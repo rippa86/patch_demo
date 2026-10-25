@@ -42,6 +42,7 @@ ldap_suffix: dc=webstore,dc=local
 ldap_people_ou: "ou=People,{{ ldap_suffix }}"
 ldap_service_dn: "uid=api,ou=Services,{{ ldap_suffix }}"
 ldap_repl_manager_dn: cn=replication manager,cn=config
+ldap_port: 389
 galera_cluster_name: webstore
 
 # Optional extras
