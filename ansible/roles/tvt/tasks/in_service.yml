@@ -1,0 +1,15 @@
+---
+# _in_service / _in_maint: shop nodes that HAProxy is / isn't sending traffic to.
+- name: HAProxy state of each node
+  ansible.builtin.include_role:
+    name: db_maint
+    tasks_from: haproxy_status
+  loop: "{{ groups['webstore_shop'] | map('extract', hostvars, 'node_name') | list }}"
+  loop_control: { loop_var: server }
+
+- name: In service / in maintenance
+  ansible.builtin.set_fact:
+    _in_service: >-
+      {% set l = [] %}{% for h in groups['webstore_shop'] %}{% if (hp[hostvars[h].node_name].web_pool | default('')) is match('UP') %}{% set _ = l.append(h) %}{% endif %}{% endfor %}{{ l }}
+    _in_maint: >-
+      {% set l = [] %}{% for h in groups['webstore_shop'] %}{% if (hp[hostvars[h].node_name].web_pool | default('')) is match('(MAINT|DRAIN)') %}{% set _ = l.append(h) %}{% endif %}{% endfor %}{{ l }}

@@ -1,0 +1,29 @@
+---
+- name: NTP state on every host (chrony offset from true time)
+  ansible.builtin.shell: |
+    s=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+    o=$(chronyc tracking 2>/dev/null | awk '/^System time/{print $4}')
+    echo "${s:-unknown} ${o:-unknown}"
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['webstore'] }}"
+  register: _t
+  changed_when: false
+
+- name: Summarise
+  ansible.builtin.set_fact:
+    _time: >-
+      {% set d = {} %}{% for r in _t.results %}{% set p = r.stdout.split() %}{% set _ = d.update({hostvars[r.item].node_name: {'sync': p[0] | default('unknown'), 'offset': p[1] | default('unknown')}}) %}{% endfor %}{{ d }}
+
+- name: Hosts not synchronised or more than 1s off
+  ansible.builtin.set_fact:
+    _time_bad: >-
+      {% set l = [] %}{% for n, v in _time.items() %}{% if v.sync != 'yes' or v.offset == 'unknown' or (v.offset | float) > 1.0 %}{% set _ = l.append(n ~ ' (sync=' ~ v.sync ~ ', offset=' ~ v.offset ~ 's)') %}{% endif %}{% endfor %}{{ l }}
+
+- name: Record
+  ansible.builtin.include_tasks: record.yml
+  vars:
+    r_check: Time
+    r_status: "{{ 'WARN' if _time_bad else 'PASS' }}"
+    r_detail: >-
+      {{ 'all hosts NTP-synchronised, offsets: ' ~ (_time | dict2items | map(attribute='key') | zip(_time.values() | map(attribute='offset')) | map('join', '=') | join('s, ')) ~ 's'
+         if not _time_bad else 'check: ' ~ _time_bad | join('; ') }}

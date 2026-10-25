@@ -1,0 +1,45 @@
+---
+- name: Home page and static health
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}{{ item }}"
+  loop: [/, /healthz.txt, /admin.html]
+
+- name: Product list
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/cart/products"
+  register: _p
+  failed_when: _p.json | length < 1
+
+- name: Customer journey with real writes (sign-up, login, cart, logout)
+  ansible.builtin.include_role:
+    name: db_maint
+    tasks_from: write_probe
+  vars:
+    db_nodes_up: []
+
+- name: Admin login
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/login"
+    method: POST
+    body_format: json
+    body: { username: "{{ admin_users[0] }}", password: "{{ lab_password }}" }
+  register: _a
+  no_log: true
+
+- name: Admin API recognises the admin
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/admin/me"
+    headers: { Authorization: "Bearer {{ _a.json.token }}" }
+
+- name: Admin logout
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/logout"
+    method: POST
+    headers: { Authorization: "Bearer {{ _a.json.token }}" }
+
+- name: Record
+  ansible.builtin.include_tasks: record.yml
+  vars:
+    r_check: Shop
+    r_status: PASS
+    r_detail: "pages, {{ _p.json | length }} products, sign-up/login/cart/logout and admin login via {{ tvt_base }}"

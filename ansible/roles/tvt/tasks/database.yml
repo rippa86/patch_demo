@@ -1,0 +1,15 @@
+---
+- name: Galera, real writes and data checksums
+  ansible.builtin.include_role:
+    name: db_maint
+    tasks_from: site_tvt
+
+- name: Record
+  ansible.builtin.include_tasks: record.yml
+  vars:
+    r_check: Database
+    r_status: "{{ 'PASS' if db_nodes_up | length == 2 else 'WARN' }}"
+    r_detail: >-
+      Galera size {{ gs[db_nodes_up[0]].wsrep_cluster_size }}, Synced:
+      {{ db_nodes_up | map('extract', hostvars, 'node_name') | join(', ') }}; writes
+      {% for n, d in probe_delta.items() %}{{ hostvars[n].node_name }}={{ d }} {% endfor %}; checksums match

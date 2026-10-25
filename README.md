@@ -118,6 +118,44 @@ INSERT INTO webstore.admins (uid) VALUES ('alice');
 DELETE FROM webstore.admins WHERE uid = 'alice';
 ```
 
+## TVT: check the whole lab any time
+
+`playbooks/tvt.yml` runs every check and prints a report. It doesn't stop at the first problem,
+and only fails the job if a section **FAILED**; **WARN** means degraded but serving (for example a
+node in maintenance). It only reads, plus harmless test writes (a TVT login, a cart that is emptied
+again, a marker on the `tvtcheck` LDAP entry); stock is never touched.
+
+| Section (switch) | Checks |
+| --- | --- |
+| HAProxy (`tvt_haproxy`) | service running, shop address present, every backend has a healthy server, nothing DOWN (MAINT = WARN) |
+| Shop (`tvt_shop`) | pages, products, sign-up, login, cart, logout and admin login through HAProxy |
+| Nodes (`tvt_nodes`) | all 8 health endpoints on each frontend directly (failures on a node in MAINT = WARN) |
+| Database (`tvt_database`) | Galera Primary/Synced, cluster size incl. garbd, real writes and where they landed, table checksums equal |
+| LDAP (`tvt_ldap`) | binds and user counts, direct logins on each in-service node, replication both ways |
+| Monitoring (`tvt_monitoring`) | exporter sees HAProxy/DB/LDAP, Prometheus scraping, Grafana up with the dashboard |
+| Time (`tvt_time`) | NTP synchronised and chrony offset under 1s on all three hosts (WARN only) |
+
+```bash
+ansible-playbook playbooks/tvt.yml -e lab_password='...'
+ansible-playbook playbooks/tvt.yml -e lab_password='...' -e tvt_ldap=false     # skip a section
+```
+
+Example report:
+
+```
+TVT PASSED WITH WARNINGS (7 sections)
+WARN  HAProxy     7 backends healthy; in maintenance: web-frontend1
+PASS  Shop        pages, 3 products, sign-up/login/cart/logout and admin login via http://10.10.4.30
+PASS  Nodes       all 16 health checks OK
+WARN  Database    Galera size 2, Synced: web-frontend2; writes web-frontend2=4; checksums match
+WARN  LDAP        up: web-frontend2 (104 users); only one directory up, replication not tested
+PASS  Monitoring  exporter sees HAProxy/DB/LDAP, Prometheus scraping, Grafana up with Webstore - Overview
+PASS  Time        all hosts NTP-synchronised, offsets: web-frontend1=0.000021s, ...
+```
+
+In AAP, give it its own job template (inventory from the project, Machine + Webstore Lab Password
+credentials, no survey needed) and add a **Schedule**, e.g. hourly, with a failure notification.
+
 ## Database maintenance on one node
 
 `playbooks/maintenance-db.yml` takes one frontend's MariaDB out of service and back, with a check
