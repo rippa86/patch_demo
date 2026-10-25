@@ -1,0 +1,19 @@
+---
+# Fail early with a useful message if the repo's group_vars/host_vars were not loaded.
+- name: Lab settings loaded for every host
+  ansible.builtin.assert:
+    that:
+      - shop_vip_ip is defined
+      - groups['webstore_shop'] | default([]) | length == 2
+      - groups['webstore_ops'] | default([]) | length == 1
+      - groups['webstore_shop'] | map('extract', hostvars) | selectattr('node_name', 'undefined') | list | length == 0
+    fail_msg: >-
+      The repo's ansible/group_vars and ansible/host_vars were not loaded (or the host/group names
+      don't match). They are only read when the inventory is the FILE ansible/hosts.ini from this repo.
+      In AAP: Inventories -> your inventory -> Sources -> Add -> "Sourced from a Project",
+      Project = this repo, Inventory file = ansible/hosts.ini, then Sync.
+      Host names must be exactly: {{ (groups['webstore_shop'] | default([])) + (groups['webstore_ops'] | default([])) }}
+      -> expected web-frontend1.lab.rippa.io, web-frontend2.lab.rippa.io (group webstore_shop)
+      and demo-vm.lab.rippa.io (group webstore_ops).
+    quiet: true
+  run_once: true

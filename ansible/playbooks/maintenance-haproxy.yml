@@ -31,6 +31,11 @@
     drain_timeout: 60
 
   pre_tasks:
+    - name: Check the inventory loaded the lab settings
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: check_inventory
+
     - name: Check the inputs
       ansible.builtin.assert:
         that:

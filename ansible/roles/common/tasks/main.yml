@@ -1,4 +1,7 @@
 ---
+- name: Check the inventory loaded the lab settings
+  ansible.builtin.include_tasks: check_inventory.yml
+
 - name: Check lab_password is set and safe for env files
   ansible.builtin.assert:
     that:

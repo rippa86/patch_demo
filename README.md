@@ -28,7 +28,7 @@ On a controller (your laptop or demo-vm) with `ansible-core` 2.14+ and SSH + sud
 ```bash
 git clone -b admin-api-and-monitoring https://github.com/rippa86/patch_demo.git
 cd patch_demo/ansible
-cp inventory.ini.example inventory.ini           # set ansible_user if you don't SSH as root
+# hosts.ini is the inventory; add -u <user> (or ansible_user) if you don't SSH as root
 vi group_vars/all/main.yml                        # IPs, names, shop URL/IP, ports
 
 ansible-playbook playbooks/site.yml -e lab_password='YourLabPassword1'
@@ -70,6 +70,15 @@ prints each node's `seqno`. Re-run with the node that has the highest value:
 ```bash
 ansible-playbook playbooks/site.yml -e galera_force_bootstrap=web-frontend2.lab.rippa.io
 ```
+
+### In Ansible Automation Platform
+
+- **Inventory:** create it from the project (Inventories → Sources → *Sourced from a Project*,
+  inventory file `ansible/hosts.ini`). Don't add the hosts by hand: the lab settings in
+  `ansible/group_vars` and `ansible/host_vars` are only loaded with that file. Every playbook checks
+  this first and explains what to fix if it's wrong.
+- **lab_password:** a custom credential type that injects it as an extra var.
+- **Pick the node** with the `target` variable (a survey works well); leave *Limit* empty.
 
 ## Check it
 

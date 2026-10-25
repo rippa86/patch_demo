@@ -8,6 +8,11 @@
   vars:
     base: "http://{{ shop_vip_ip }}"
   tasks:
+    - name: Check the inventory loaded the lab settings
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: check_inventory
+
     - name: Shop page through HAProxy
       ansible.builtin.uri:
         url: "{{ base }}/"

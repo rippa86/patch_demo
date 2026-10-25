@@ -7,6 +7,11 @@
   vars:
     haproxy_server: "{{ hostvars[target].node_name }}"
   pre_tasks:
+    - name: Check the inventory loaded the lab settings
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: check_inventory
+
     - name: Require target
       ansible.builtin.assert:
         that:
