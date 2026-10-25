@@ -139,6 +139,21 @@ Galera has no fixed primary: both nodes accept writes, and each frontend writes 
 "Primary" here means the only node receiving traffic; the TVT proves it from the write counters.
 The TVT uses a `tvtcheck` shop account (created on first run, password = lab_password).
 
+## Take one node out of HAProxy
+
+`playbooks/maintenance-haproxy.yml` only touches HAProxy on demo-vm; the node's containers and
+database keep running.
+
+| Switch | What it does | Refuses when |
+| --- | --- | --- |
+| `remove_haproxy` | DRAIN the node in every backend, wait for its open connections to finish (`drain_timeout`, default 60s), then MAINT; checks the shop still answers. | the other node isn't UP everywhere, or connections are still open after the timeout (add `-e force_remove=true` to cut them) |
+| `restore_haproxy` | Checks the node's own services are healthy, sets it READY and waits until HAProxy marks it UP in every backend. | any of its health checks fail |
+
+```bash
+ansible-playbook playbooks/maintenance-haproxy.yml -e target=web-frontend1.lab.rippa.io -e remove_haproxy=true
+ansible-playbook playbooks/maintenance-haproxy.yml -e target=web-frontend1.lab.rippa.io -e restore_haproxy=true
+```
+
 ## Drain one shop host
 
 Bleed connections off a node in HAProxy, then stop its services; the other node and garbd keep
