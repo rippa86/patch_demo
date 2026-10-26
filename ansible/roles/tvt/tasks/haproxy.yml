@@ -10,7 +10,7 @@
 - name: Server states
   ansible.builtin.shell: |
     echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
-      | awk -F, 'NR>1 && $1!="stats" && $2!="FRONTEND" {print $1" "$2" "$18}'
+      | awk -F, 'NR>1 && NF>1 && $1!="stats" && $2!="FRONTEND" {print $1" "$2" "$18}'
   register: _hp_all
   changed_when: false
 

@@ -138,7 +138,13 @@ again, a marker on the `tvtcheck` LDAP entry); stock is never touched.
 ```bash
 ansible-playbook playbooks/tvt.yml -e lab_password='...'
 ansible-playbook playbooks/tvt.yml -e lab_password='...' -e tvt_ldap=false     # skip a section
+ansible-playbook playbooks/tvt.yml -e lab_password='...' -e tvt_require_all_online=true
 ```
+
+By default a node in maintenance (MAINT/DRAIN, a stopped DB or LDAP) is a WARN, so the TVT still
+passes while you work on one node. Add `-e tvt_require_all_online=true` when everything should be
+back in service (scheduled checks, the last node of a maintenance workflow): every WARN becomes a
+FAIL, except Time. In AAP, add it as a survey/extra var on the TVT job template.
 
 Example report:
 

@@ -50,7 +50,7 @@
     - name: Every HAProxy server is UP
       ansible.builtin.shell: |
         echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
-          | awk -F, 'NR>1 && $2!="FRONTEND" && $2!="BACKEND" && $1!="stats" && $18 !~ /^UP/ {print $1"/"$2" "$18}'
+          | awk -F, 'NR>1 && NF>1 && $2!="FRONTEND" && $2!="BACKEND" && $1!="stats" && $18 !~ /^UP/ {print $1"/"$2" "$18}'
       register: hp_down
       until: hp_down.stdout == ''
       retries: 10

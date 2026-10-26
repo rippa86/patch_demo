@@ -11,6 +11,10 @@
 #   ansible-playbook playbooks/tvt.yml -e lab_password=... -e tvt_ldap=false -e tvt_time=false
 #
 # Sections (all true by default): tvt_haproxy tvt_shop tvt_nodes tvt_database tvt_ldap tvt_monitoring tvt_time
+#
+# -e tvt_require_all_online=true  strict mode: anything not fully online (a node in HAProxy
+#                                 maintenance, one DB node or directory down) is a FAIL, not a WARN.
+#                                 Use it for scheduled checks and the end of a maintenance workflow.
 
 - name: Webstore TVT
   hosts: webstore_ops
@@ -152,6 +156,12 @@
             r_status: FAIL
             r_detail: "{{ ansible_failed_task.name | default('?') }}: {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | map(attribute='msg') | first) if (ansible_failed_result.msg | default('')) is search('One or more items failed') else ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')) }}"
 
+    - name: Strict mode - a WARN means something is not online, so treat it as a FAIL
+      when: tvt_require_all_online | default(false) | bool
+      ansible.builtin.set_fact:
+        tvt_results: >-
+          {% set l = [] %}{% for r in tvt_results %}{% if r.status == 'WARN' and r.check != 'Time' %}{% set _ = l.append(r | combine({'status': 'FAIL', 'detail': '(require all online) ' ~ r.detail})) %}{% else %}{% set _ = l.append(r) %}{% endif %}{% endfor %}{{ l }}
+
     - name: Build the report
       ansible.builtin.set_fact:
         tvt_overall: >-
@@ -170,6 +180,7 @@
         data:
           tvt_report:
             overall: "{{ tvt_overall }}"
+            strict: "{{ tvt_require_all_online | default(false) | bool }}"
             sections: "{{ tvt_results }}"
             failed: "{{ tvt_results | selectattr('status', 'equalto', 'FAIL') | map(attribute='check') | list }}"
             warnings: "{{ tvt_results | selectattr('status', 'equalto', 'WARN') | map(attribute='check') | list }}"
