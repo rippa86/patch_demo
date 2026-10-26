@@ -104,7 +104,7 @@
         - name: Confirm port 389 is closed on {{ target_name }}
           ansible.builtin.wait_for:
             host: 127.0.0.1
-            port: "{{ hostvars[target].ldap_port | default(ldap_port) }}"
+            port: "{{ hostvars[target].ldap_port | default(389) }}"
             state: stopped
             timeout: 30
           delegate_to: "{{ target }}"
@@ -160,7 +160,7 @@
         - name: Wait for port 389
           ansible.builtin.wait_for:
             host: 127.0.0.1
-            port: "{{ hostvars[target].ldap_port | default(ldap_port) }}"
+            port: "{{ hostvars[target].ldap_port | default(389) }}"
             timeout: 60
           delegate_to: "{{ target }}"
 
