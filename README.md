@@ -226,6 +226,37 @@ ansible-playbook playbooks/maintenance-ldap.yml -e lab_password='...' -e target=
 Changes made while one directory is down queue on the other and replay when it starts; keep
 outages well under the changelog retention (about 7 days by default).
 
+## Patch RHEL and reboot
+
+`playbooks/patch-rhel.yml` installs updates on one host and reboots it if needed, one host per
+run (`target`). Updates go on while the node is still serving; only the reboot moves traffic.
+
+```bash
+ansible-playbook playbooks/patch-rhel.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io
+ansible-playbook playbooks/patch-rhel.yml -e lab_password='...' -e target=web-frontend2.lab.rippa.io
+ansible-playbook playbooks/patch-rhel.yml -e lab_password='...' -e target=demo-vm.lab.rippa.io -e allow_shop_outage=true
+ansible-playbook playbooks/tvt.yml        -e lab_password='...' -e tvt_require_all_online=true
+```
+
+| Option | Values |
+| --- | --- |
+| `patch_scope` | `kernel` (default, kernel packages only), `security` (all security errata), `all` |
+| `patch_reboot` | `needed` (default: a new kernel, or `dnf needs-restarting -r` says so), `always`, `never` |
+| `drain_timeout`, `force_remove` | as in the HAProxy playbook |
+| `allow_shop_outage` | required to reboot demo-vm |
+
+- **web-frontend1/2:** refuses to reboot unless the other node is UP in HAProxy, Synced in a
+  3-member Galera cluster and its LDAP works. It drains the node to MAINT, stops MariaDB cleanly,
+  reboots, checks the new kernel is running, waits for MariaDB to resync, the apps and LDAP to pass
+  health checks, then puts the node back in HAProxy. A node that was already in MAINT before you
+  started stays in MAINT.
+- **demo-vm:** HAProxy runs there, so the shop is offline for the 1-3 minutes it takes to reboot,
+  which is why it needs `allow_shop_outage=true`. Both frontends must be Synced first, so Galera
+  keeps quorum without garbd. Run it from AAP or another machine, never from demo-vm itself.
+- If a step fails, nothing is rebooted after it, and the job publishes `maint_patch.patch_rhel` with
+  `result: FAIL` and the reason. A successful run records the updates, the kernel before and after,
+  and whether it rebooted.
+
 ## AAP workflow: frontend maintenance
 
 The maintenance playbooks and `tvt.yml` publish their results with `set_stats`, so an AAP workflow
@@ -233,7 +264,7 @@ passes them from node to node (and to notifications) as extra vars:
 
 | Artifact | Contents |
 | --- | --- |
-| `maint_haproxy`, `maint_db`, `maint_ldap` | one record per action, e.g. `maint_db.switch_primary` = `{result, node, tvt: {...}, error, finished_at, job_id}` |
+| `maint_haproxy`, `maint_db`, `maint_ldap`, `maint_patch` | one record per action, e.g. `maint_db.switch_primary` = `{result, node, tvt: {...}, error, finished_at, job_id}` |
 | `maint_last` | the most recent step's record (handy for notification templates) |
 | `maint_history` | every step in the workflow so far, in order (each job appends) |
 | `maint_target` | the node being worked on |
@@ -282,5 +313,5 @@ ansible-playbook playbooks/restore.yml -e target=web-frontend1.lab.rippa.io -e l
 | `backend/` | SQL, sessions, cart |
 | `dashboard/` | Old logged-in graph (superseded by `monitoring/`) |
 | `synth-users/` | 100 lab logins against the VIP |
-| `ansible/` | `site.yml` (full build), smoke, drain, restore; roles per component; settings in `group_vars/all/main.yml` |
+| `ansible/` | `site.yml` (full build), `tvt.yml`, maintenance-db/haproxy/ldap, `patch-rhel.yml`, smoke, drain, restore; roles per component; settings in `group_vars/all/main.yml` |
 | `deploy/` | Quadlets, LDAP helper scripts, env example (keepalived/shop-HAProxy files are legacy, unused) |

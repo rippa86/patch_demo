@@ -1,0 +1,451 @@
+---
+# Patch RHEL on ONE lab host and reboot it, without taking the shop down.
+# Run it once per host: web-frontend1, then web-frontend2, then demo-vm.
+#
+#   web-frontend1/2  1. Install the updates while the node is still serving
+#                    2. If a reboot is needed: refuse unless the other node can carry
+#                       everything (HAProxy UP, Galera Synced, cluster size 3, LDAP up)
+#                    3. DRAIN -> wait for connections -> MAINT in HAProxy
+#                    4. Stop the backend and MariaDB cleanly (Galera saves its position)
+#                    5. Reboot, check the new kernel is running
+#                    6. MariaDB resyncs (IST), apps + LDAP come back, health checks pass
+#                    7. READY in HAProxy, wait for UP, check the shop
+#   demo-vm          HAProxy runs here, so the shop is OFFLINE while it reboots (1-3 min).
+#                    You must add -e allow_shop_outage=true. Refuses unless both
+#                    frontends are Synced (they keep Galera quorum while garbd is down).
+#                    After the reboot: HAProxy, shop address, garbd (cluster size 3),
+#                    monitoring and the shop are checked.
+#
+# Examples (from ansible/):
+#   ansible-playbook playbooks/patch-rhel.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io
+#   ansible-playbook playbooks/patch-rhel.yml -e lab_password='...' -e target=demo-vm.lab.rippa.io -e allow_shop_outage=true
+#
+# Options:
+#   -e patch_scope=kernel     kernel packages only (default)
+#   -e patch_scope=security   all security errata
+#   -e patch_scope=all        every available update
+#   -e patch_reboot=needed    reboot only if a newer kernel/core library needs it (default)
+#   -e patch_reboot=always    always reboot
+#   -e patch_reboot=never     install only
+#   -e drain_timeout=120      seconds to wait for connections to finish before MAINT
+#   -e force_remove=true      go to MAINT even if connections remain after drain_timeout
+#
+# Don't run it for demo-vm FROM demo-vm (the reboot would kill the run): use AAP or another machine.
+
+- name: Patch RHEL on {{ target | default('(set -e target=...)') }}
+  hosts: webstore_ops
+  become: true
+  gather_facts: false
+  vars:
+    ms_playbook: patch-rhel
+    patch_scope: kernel
+    patch_reboot: needed
+    drain_timeout: 60
+    is_shop: "{{ target in groups['webstore_shop'] }}"
+    # the other frontend (for demo-vm: unused, but must still name a real host for delegate_to)
+    peer: "{{ groups['webstore_shop'] | difference([target]) | first }}"
+    target_name: "{{ hostvars[target].node_name }}"
+    peer_name: "{{ hostvars[peer].node_name }}"
+    shop_base: "http://{{ shop_vip_ip }}"
+    dnf_filter: "{{ {'kernel': \"'kernel*'\", 'security': '--security', 'all': ''}[patch_scope] }}"
+
+  pre_tasks:
+    - name: Check the inventory loaded the lab settings
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: check_inventory
+
+    - name: Check the inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - target in groups['webstore']
+          - patch_scope in ['kernel', 'security', 'all']
+          - patch_reboot in ['needed', 'always', 'never']
+        fail_msg: >-
+          Use -e target=<{{ groups['webstore'] | join('|') }}>,
+          optional -e patch_scope=kernel|security|all and -e patch_reboot=needed|always|never
+
+    - name: demo-vm runs HAProxy - rebooting it takes the shop offline
+      ansible.builtin.assert:
+        that: allow_shop_outage | default(false) | bool
+        fail_msg: >-
+          {{ target }} runs HAProxy (and garbd, Grafana, Prometheus). While it reboots the shop at
+          {{ shop_url }} is OFFLINE for 1-3 minutes. Add -e allow_shop_outage=true to go ahead,
+          or -e patch_reboot=never to only install the updates.
+      when: not is_shop and patch_reboot != 'never'
+
+    - name: Where is Ansible running?
+      ansible.builtin.shell: |
+        if (ip -4 -o addr show 2>/dev/null || hostname -I 2>/dev/null) | grep -qw '{{ ops_ip }}'; then echo self; else echo other; fi
+      delegate_to: localhost
+      become: false
+      register: _controller
+      changed_when: false
+      when: not is_shop and patch_reboot != 'never'
+
+    - name: Don't reboot the machine Ansible itself is running on
+      ansible.builtin.assert:
+        that: _controller.stdout != 'self'
+        fail_msg: >-
+          Ansible is running on {{ target }} itself; rebooting it would kill this run half-way.
+          Run it from AAP or another machine, or use -e patch_reboot=never and reboot by hand.
+      when: not is_shop and patch_reboot != 'never'
+
+  tasks:
+    - name: Patch {{ target_name }}
+      block:
+        # ---------------------------------------------------------------- what's there
+        - name: Kernel running now / kernel set to boot
+          ansible.builtin.shell: &kernels |
+            echo "running=$(uname -r)"
+            echo "default=$(grubby --default-kernel 2>/dev/null | sed 's|.*/vmlinuz-||')"
+          delegate_to: "{{ target }}"
+          register: _k0
+          changed_when: false
+
+        - name: Updates available ({{ patch_scope }})
+          ansible.builtin.shell: dnf -q --refresh check-update {{ dnf_filter }}
+          delegate_to: "{{ target }}"
+          register: _pending
+          changed_when: false
+          failed_when: _pending.rc not in [0, 100]
+
+        - name: Read them
+          ansible.builtin.set_fact:
+            kernel_before: "{{ _k0.stdout_lines | select('match', '^running=') | first | regex_replace('^running=', '') }}"
+            pending_updates: >-
+              {% set l = [] %}{% for line in _pending.stdout_lines %}{% set p = line.split() %}
+              {%- if p | length == 3 and '.' in p[0] and not line.startswith(' ') %}{% set _ = l.append(p[0] ~ ' ' ~ p[1]) %}{% endif %}{% endfor %}{{ l }}
+
+        - name: Plan
+          ansible.builtin.debug:
+            msg:
+              - "{{ target_name }}: running kernel {{ kernel_before }}"
+              - "{{ pending_updates | length }} update(s) ({{ patch_scope }}): {{ pending_updates | join(', ') if pending_updates else 'none' }}"
+              - "Reboot policy: {{ patch_reboot }}"
+
+        # ---------------------------------------------------------------- install
+        - name: "1. Install the updates (node keeps serving meanwhile)"
+          ansible.builtin.shell: dnf -y upgrade {{ dnf_filter }}
+          delegate_to: "{{ target }}"
+          register: _install
+          when: pending_updates | length > 0
+          changed_when: "'Nothing to do' not in _install.stdout"
+
+        - name: Kernels after the install
+          ansible.builtin.shell: *kernels
+          delegate_to: "{{ target }}"
+          register: _k1
+          changed_when: false
+
+        - name: Does anything else need a reboot? (core libraries, systemd, glibc ...)
+          ansible.builtin.command: dnf needs-restarting -r
+          delegate_to: "{{ target }}"
+          register: _nr
+          changed_when: false
+          failed_when: false
+
+        - name: Decide
+          ansible.builtin.set_fact:
+            kernel_default: "{{ _k1.stdout_lines | select('match', '^default=') | first | regex_replace('^default=', '') }}"
+            reboot_reason: >-
+              {%- set kd = _k1.stdout_lines | select('match', '^default=') | first | regex_replace('^default=', '') -%}
+              {%- if patch_reboot == 'never' -%}
+              {%- elif kd and kd != kernel_before -%}new kernel {{ kd }}
+              {%- elif _nr.rc == 1 -%}dnf needs-restarting says core packages were updated
+              {%- elif patch_reboot == 'always' -%}patch_reboot=always
+              {%- endif -%}
+
+        - name: Reboot decision
+          ansible.builtin.debug:
+            msg: >-
+              {{ ('Rebooting ' ~ target_name ~ ': ' ~ reboot_reason) if reboot_reason
+                 else ('No reboot: ' ~ ('patch_reboot=never' if patch_reboot == 'never'
+                      else 'already running the newest kernel ' ~ kernel_before)) }}
+              {{- (' (WARNING: kernel ' ~ kernel_default ~ ' is installed but not running)')
+                  if patch_reboot == 'never' and kernel_default and kernel_default != kernel_before else '' }}
+
+        # ---------------------------------------------------------------- web-frontend reboot
+        - name: Reboot {{ target_name }} without taking the shop down
+          when: reboot_reason | length > 0 and is_shop
+          block:
+            - name: Current state of both nodes
+              ansible.builtin.include_role:
+                name: db_maint
+                tasks_from: "{{ item.t }}"
+              loop:
+                - { t: haproxy_status, server: "{{ target_name }}" }
+                - { t: haproxy_status, server: "{{ peer_name }}" }
+                - { t: galera_status, node: "{{ peer }}" }
+              vars:
+                server: "{{ item.server | default('') }}"
+                node: "{{ item.node | default('') }}"
+
+            - name: LDAP on {{ peer_name }}
+              ansible.builtin.include_role:
+                name: ldap_maint
+                tasks_from: ldap_status
+              vars:
+                node: "{{ peer }}"
+
+            - name: "2. {{ peer_name }} must carry everything while {{ target_name }} reboots"
+              ansible.builtin.assert:
+                that:
+                  - hp[peer_name].values() | reject('match', '^UP') | list | length == 0
+                  - gs[peer].up
+                  - gs[peer].wsrep_cluster_status | default('') == 'Primary'
+                  - gs[peer].wsrep_local_state_comment | default('') == 'Synced'
+                  - gs[peer].wsrep_cluster_size | default(0) | int >= 3
+                  - ls[peer].up
+                fail_msg: >-
+                  Not safe to reboot {{ target_name }}: {{ peer_name }} HAProxy={{ hp[peer_name] }},
+                  Galera={{ gs[peer] }}, LDAP={{ ls[peer] }}.
+                  {{ peer_name }} must be UP in HAProxy, Synced, LDAP up, and the cluster must have 3
+                  members (both nodes + garbd) so it keeps quorum alone. Fix that first, or run with
+                  -e patch_reboot=never to only install.
+
+            - name: Was {{ target_name }} already out of HAProxy?
+              ansible.builtin.set_fact:
+                already_out: "{{ hp[target_name].values() | reject('match', '^MAINT') | list | length == 0 }}"
+
+            - name: "3a. DRAIN {{ target_name }}"
+              when: not already_out
+              ansible.builtin.include_role:
+                name: haproxy_state
+              vars:
+                haproxy_server: "{{ target_name }}"
+                haproxy_state: drain
+
+            - name: "3b. Wait for its open connections to finish (max {{ drain_timeout }}s)"
+              ansible.builtin.shell: |
+                echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+                  | awk -F, -v n="{{ target_name }}" 'NR > 1 && NF > 1 && $2 == n { c += $5 } END { print c + 0 }'
+              register: _scur
+              when: not already_out
+              until: _scur.stdout | int == 0
+              retries: "{{ (drain_timeout | int / 2) | round(0, 'ceil') | int }}"
+              delay: 2
+              changed_when: false
+              failed_when: false
+
+            - name: Connections did not finish in time
+              ansible.builtin.fail:
+                msg: >-
+                  {{ target_name }} still has {{ _scur.stdout }} open connection(s) after {{ drain_timeout }}s.
+                  It is DRAINED (no new traffic) and the updates are installed, but it was not rebooted.
+                  Re-run (nothing is installed twice), raise -e drain_timeout, or add -e force_remove=true.
+              when:
+                - not already_out
+                - _scur.stdout | int > 0
+                - not (force_remove | default(false) | bool)
+
+            - name: "3c. MAINT {{ target_name }}"
+              when: not already_out
+              ansible.builtin.include_role:
+                name: haproxy_state
+              vars:
+                haproxy_server: "{{ target_name }}"
+                haproxy_state: maint
+
+            - name: "4. Stop the backend, then MariaDB (clean Galera leave)"
+              ansible.builtin.systemd:
+                name: "{{ item }}"
+                state: stopped
+              loop: [webstore-backend.service, webstore-mariadb.service]
+              delegate_to: "{{ target }}"
+
+            - name: "{{ peer_name }} still has quorum on its own"
+              ansible.builtin.shell: &peer_galera |
+                podman exec webstore-mariadb mariadb -uroot -p"$PW" -Nse \
+                  "SHOW STATUS WHERE Variable_name IN ('wsrep_cluster_size','wsrep_cluster_status','wsrep_local_state_comment')" 2>/dev/null
+              environment:
+                PW: "{{ lab_password }}"
+              delegate_to: "{{ peer }}"
+              register: _q
+              until: "'Primary' in _q.stdout and 'Synced' in _q.stdout"
+              retries: 12
+              delay: 5
+              changed_when: false
+
+            - name: "5. Reboot {{ target_name }}"
+              ansible.builtin.reboot: &reboot
+                msg: "Rebooting for RHEL patches (patch-rhel.yml)"
+                reboot_timeout: 1200
+                post_reboot_delay: 10
+              delegate_to: "{{ target }}"
+
+            - name: "6. MariaDB resync, apps and health checks on {{ target_name }}"
+              ansible.builtin.include_role:
+                name: db_maint
+                tasks_from: start_node
+
+            - name: LDAP is back on {{ target_name }}
+              ansible.builtin.shell: |
+                systemctl is-active -q dirsrv@webstore && \
+                  ldapwhoami -x -H ldap://127.0.0.1:{{ hostvars[target].ldap_port | default(389) }} \
+                    -D "{{ ldap_service_dn }}" -w "$PW" >/dev/null
+              environment:
+                PW: "{{ lab_password }}"
+              delegate_to: "{{ target }}"
+              register: _ldap
+              until: _ldap.rc == 0
+              retries: 30
+              delay: 5
+              changed_when: false
+
+            - name: "7a. READY {{ target_name }} in HAProxy"
+              when: not already_out
+              ansible.builtin.include_role:
+                name: haproxy_state
+              vars:
+                haproxy_server: "{{ target_name }}"
+                haproxy_state: ready
+
+            - name: "7b. Wait until HAProxy marks {{ target_name }} UP everywhere"
+              when: not already_out
+              ansible.builtin.shell: |
+                echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+                  | awk -F, -v n="{{ target_name }}" 'NR>1 && NF>1 && $2==n && $18 !~ /^UP/ {print $1" "$18}'
+              register: _not_up
+              until: _not_up.stdout == ''
+              retries: 20
+              delay: 3
+              changed_when: false
+
+        # ---------------------------------------------------------------- demo-vm reboot
+        - name: Reboot {{ target_name }} (shop offline meanwhile)
+          when: reboot_reason | length > 0 and not is_shop
+          block:
+            - name: Galera on both frontends
+              ansible.builtin.include_role:
+                name: db_maint
+                tasks_from: galera_status
+              loop: "{{ groups['webstore_shop'] }}"
+              loop_control: { loop_var: node }
+
+            - name: "2. Both frontends must be Synced (they keep quorum while garbd is down)"
+              ansible.builtin.assert:
+                that: >-
+                  groups['webstore_shop'] | map('extract', gs) | selectattr('wsrep_local_state_comment', 'defined')
+                  | selectattr('wsrep_local_state_comment', 'equalto', 'Synced') | list | length == 2
+                fail_msg: "Not safe to reboot {{ target_name }}: Galera {{ gs }}. Both frontends must be Synced."
+
+            - name: "3. Reboot {{ target_name }}"
+              ansible.builtin.reboot: *reboot
+              delegate_to: "{{ target }}"
+
+            - name: "4. HAProxy, garbd and monitoring are running"
+              ansible.builtin.systemd:
+                name: "{{ item }}"
+                state: started
+              loop: [haproxy, webstore-garbd.service, webstore-exporter.service, webstore-prometheus.service, webstore-grafana.service]
+              delegate_to: "{{ target }}"
+
+            - name: Shop address {{ shop_vip_ip }} is back on {{ target_name }}
+              ansible.builtin.shell: ip -4 -o addr show | grep -q ' {{ shop_vip_ip | regex_replace(":.*", "") }}/'
+              delegate_to: "{{ target }}"
+              register: _vip
+              until: _vip.rc == 0
+              retries: 12
+              delay: 5
+              changed_when: false
+
+            - name: garbd rejoined Galera (cluster size 3)
+              ansible.builtin.shell: *peer_galera
+              environment:
+                PW: "{{ lab_password }}"
+              delegate_to: "{{ groups['webstore_shop'] | first }}"
+              register: _q
+              until: "'Primary' in _q.stdout and 'wsrep_cluster_size\t3' in _q.stdout"
+              retries: 24
+              delay: 5
+              changed_when: false
+
+            - name: HAProxy sees every server UP
+              ansible.builtin.shell: |
+                echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+                  | awk -F, 'NR>1 && NF>1 && $2!="FRONTEND" && $2!="BACKEND" && $1!="stats" && $18 !~ /^UP/ {print $1"/"$2" "$18}'
+              delegate_to: "{{ target }}"
+              register: _not_up
+              until: _not_up.stdout == ''
+              retries: 20
+              delay: 3
+              changed_when: false
+
+        # ---------------------------------------------------------------- after
+        - name: Kernel running after the reboot
+          ansible.builtin.shell: *kernels
+          delegate_to: "{{ target }}"
+          register: _k2
+          changed_when: false
+          when: reboot_reason | length > 0
+
+        - name: Check the new kernel is the one running
+          ansible.builtin.assert:
+            that: kernel_after == kernel_default
+            fail_msg: "{{ target_name }} booted {{ kernel_after }}, expected {{ kernel_default }} (check grubby --default-kernel)"
+          vars:
+            kernel_after: "{{ _k2.stdout_lines | select('match', '^running=') | first | regex_replace('^running=', '') }}"
+          when: reboot_reason | length > 0 and kernel_default | length > 0
+
+        - name: "Check: the shop answers through HAProxy"
+          ansible.builtin.uri:
+            url: "{{ shop_base }}{{ item }}"
+          loop: [/, /api/cart/products]
+          register: _shop
+          until: _shop.status == 200
+          retries: 10
+          delay: 3
+
+        - name: Done
+          ansible.builtin.set_fact:
+            _summary:
+              scope: "{{ patch_scope }}"
+              updates_installed: "{{ pending_updates }}"
+              kernel_before: "{{ kernel_before }}"
+              kernel_now: "{{ (_k2.stdout_lines | default(_k1.stdout_lines)) | select('match', '^running=') | first | regex_replace('^running=', '') }}"
+              rebooted: "{{ reboot_reason | length > 0 }}"
+              reboot_reason: "{{ reboot_reason }}"
+              haproxy_left_out: "{{ already_out | default(false) }}"
+              shop_check: passed
+
+        - name: Result
+          ansible.builtin.debug:
+            msg:
+              - "PASS - {{ target_name }}: {{ pending_updates | length }} update(s) installed, {{ 'rebooted (' ~ reboot_reason ~ ')' if _summary.rebooted else 'not rebooted' }}."
+              - "Kernel {{ kernel_before }} -> {{ _summary.kernel_now }}"
+              - "{{ (target_name ~ ' was already in MAINT before patching, so it was left in MAINT. Put it back with maintenance-haproxy.yml -e restore_haproxy=true.')
+                   if _summary.haproxy_left_out | bool else 'Shop is answering through HAProxy.' }}"
+
+        - name: Record patch_rhel for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: patch
+            ms_action: patch_rhel
+            ms_result: PASS
+            ms_tvt: "{{ _summary }}"
+      rescue:
+        - name: What went wrong
+          ansible.builtin.set_fact:
+            _err: >-
+              {{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}
+              {{- (' - ' ~ (ansible_failed_result.stderr_lines | last)) if ansible_failed_result.stderr_lines | default([]) | length > 0 else '' }}
+
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: patch
+            ms_action: patch_rhel
+            ms_result: FAIL
+            ms_error: "{{ _err }}"
+
+        - name: Stop - patching failed
+          ansible.builtin.fail:
+            msg: >-
+              {{ _err }}.
+              {{ 'Check HAProxy: ' ~ target_name ~ ' may still be in MAINT/DRAIN. Once it is healthy, run maintenance-haproxy.yml -e restore_haproxy=true.' if is_shop and already_out is defined else (target_name ~ ' was not taken out of HAProxy.' if is_shop else '') }}
