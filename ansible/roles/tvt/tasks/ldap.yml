@@ -1,0 +1,49 @@
+---
+- name: LDAP state of both nodes
+  ansible.builtin.include_role:
+    name: ldap_maint
+    tasks_from: ldap_status
+  loop: "{{ groups['webstore_shop'] }}"
+  loop_control: { loop_var: node }
+
+- name: Nodes with LDAP up
+  ansible.builtin.set_fact:
+    _ldap_up: "{{ groups['webstore_shop'] | select('in', ls | dict2items | selectattr('value.up') | map(attribute='key') | list) | list }}"
+
+- name: At least one directory works
+  ansible.builtin.assert:
+    that: _ldap_up | length > 0
+    fail_msg: "No LDAP server usable: {{ ls }}"
+
+- name: User counts match
+  ansible.builtin.assert:
+    that: _ldap_up | map('extract', ls) | map(attribute='people') | unique | list | length == 1
+    fail_msg: "User counts differ: {% for n in _ldap_up %}{{ hostvars[n].node_name }}={{ ls[n].people }} {% endfor %}"
+
+- name: Which nodes are in service
+  ansible.builtin.include_tasks: in_service.yml
+
+- name: Login directly on each in-service node's login API
+  ansible.builtin.include_role:
+    name: ldap_maint
+    tasks_from: login_check
+  loop: "{{ _in_service }}"
+  loop_control: { loop_var: login_node }
+
+- name: Replication both ways
+  ansible.builtin.include_role:
+    name: ldap_maint
+    tasks_from: repl_probe
+  vars:
+    repl_pair: "{{ groups['webstore_shop'] }}"
+  when: _ldap_up | length == 2
+
+- name: Record
+  ansible.builtin.include_tasks: record.yml
+  vars:
+    r_check: LDAP
+    r_status: "{{ 'PASS' if _ldap_up | length == 2 else 'WARN' }}"
+    r_detail: >-
+      up: {{ _ldap_up | map('extract', hostvars, 'node_name') | join(', ') }} ({{ ls[_ldap_up[0]].people }} users);
+      {{ 'replication verified both ways' if _ldap_up | length == 2 else 'only one directory up, replication not tested' }};
+      direct logins OK on {{ _in_service | map('extract', hostvars, 'node_name') | join(', ') }}

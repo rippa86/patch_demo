@@ -1,0 +1,9 @@
+FROM registry.access.redhat.com/ubi10/python-312-minimal:10.2
+USER 0
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY exporter.py /app/exporter.py
+USER 1001
+EXPOSE 9200
+CMD ["python3", "/app/exporter.py"]

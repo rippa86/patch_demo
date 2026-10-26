@@ -6,13 +6,14 @@ Wants=network-online.target
 [Container]
 Image=docker.io/library/mariadb:11.4.5
 ContainerName=webstore-mariadb
+HostName=mariadb
 Network=webstore-net.network
 PublishPort=3306:3306
 PublishPort=4444:4444
 PublishPort=4567:4567
 PublishPort=4568:4568
 Volume=webstore-mariadb-data.volume:/var/lib/mysql
-Volume=/etc/webstore/galera.cnf:/etc/mysql/conf.d/galera.cnf:ro
+Volume=/etc/webstore/galera.cnf:/etc/mysql/mariadb.conf.d/60-galera.cnf:ro
 EnvironmentFile=/etc/webstore/webstore.env
 Environment=MARIADB_DATABASE=webstore
 Environment=MARIADB_USER=webstore

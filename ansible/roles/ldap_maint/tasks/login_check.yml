@@ -1,0 +1,19 @@
+---
+# Log in as the TVT user against ONE node's own login API (not through HAProxy),
+# so we know that node's API can authenticate. vars: login_node
+- name: "Login directly on {{ hostvars[login_node].node_name }}'s login API"
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8011/api/login
+    method: POST
+    body_format: json
+    body: { username: "{{ tvt_user }}", password: "{{ lab_password }}" }
+  delegate_to: "{{ login_node }}"
+  register: _direct
+  no_log: true
+
+- name: Log out again
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8012/api/logout
+    method: POST
+    headers: { Authorization: "Bearer {{ _direct.json.token }}" }
+  delegate_to: "{{ login_node }}"

@@ -1,5 +1,8 @@
 # Bootstrap — lab.rippa.io webstore
 
+> **Superseded:** `ansible/playbooks/site.yml` now does all of this (see the main README).
+> These manual notes describe the original keepalived design and are kept for reference only.
+
 Lab addressing: **web-frontend1.lab.rippa.io** / **10.10.4.115**,
 **web-frontend2.lab.rippa.io** / **10.10.4.116**, VIP **10.10.4.50** for
 `shoppingapp.lab.rippa.io`. Quorum host is `demo-vm.lab.rippa.io` /
@@ -87,6 +90,7 @@ sudo systemctl enable --now \
   webstore-api-logout.service \
   webstore-api-cart.service \
   webstore-api-stats.service \
+  webstore-api-admin.service \
   webstore-httpd.service \
   webstore-haproxy.service \
   keepalived.service

@@ -1,10 +1,14 @@
+import logging
 import os
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import Base, Product
+from app.models import Admin, Base, Product
+
+log = logging.getLogger("webstore.db")
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "mysql+pymysql://webstore:webstore@mariadb:3306/webstore"
@@ -17,6 +21,11 @@ engine = create_engine(
     pool_size=10,
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
+# Comma-separated LDAP uids that get the admin role at startup.
+ADMIN_USERS = [
+    u.strip() for u in os.environ.get("ADMIN_USERS", "admin").split(",") if u.strip()
+]
 
 SEED_PRODUCTS = [
     {
@@ -64,8 +73,47 @@ def galera_synced(status: dict[str, str]) -> bool:
     )
 
 
+def _add_missing_columns() -> None:
+    """create_all() only creates new tables; add columns new code expects.
+
+    Both backends may start together, so a "duplicate column" race is ignored.
+    On Galera, ALTER TABLE replicates to every node (TOI).
+    """
+    wanted = {
+        "sessions": [("node", "VARCHAR(64) NULL")],
+    }
+    insp = inspect(engine)
+    for table, columns in wanted.items():
+        have = {c["name"] for c in insp.get_columns(table)}
+        for name, ddl in columns:
+            if name in have:
+                continue
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+                    conn.execute(text(f"CREATE INDEX ix_{table}_{name} ON {table} ({name})"))
+                log.info("added column %s.%s", table, name)
+            except DBAPIError as exc:
+                log.warning("add column %s.%s skipped: %s", table, name, exc.orig)
+
+
+def _seed_admins() -> None:
+    for uid in ADMIN_USERS:
+        with SessionLocal() as db:
+            if db.get(Admin, uid) is not None:
+                continue
+            db.add(Admin(uid=uid))
+            try:
+                db.commit()
+                log.info("granted admin role to %s", uid)
+            except (IntegrityError, DBAPIError):
+                db.rollback()  # the other backend seeded it first
+
+
 def init_schema() -> None:
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
+    _seed_admins()
     with SessionLocal() as db:
         count = db.scalar(select(Product.id).limit(1))
         if count is None:

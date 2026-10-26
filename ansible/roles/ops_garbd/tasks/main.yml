@@ -1,0 +1,28 @@
+---
+- name: Build the garbd image
+  ansible.builtin.shell: |
+    set -e
+    tag=localhost/webstore-garbd:1.0
+    before=$(podman image inspect --format '{{ '{{' }}.Id{{ '}}' }}' "$tag" 2>/dev/null || true)
+    podman build -q -t "$tag" -f {{ repo_dest }}/deploy/galera/Containerfile.garbd {{ repo_dest }}/deploy/galera >/dev/null
+    after=$(podman image inspect --format '{{ '{{' }}.Id{{ '}}' }}' "$tag")
+    [ "$before" = "$after" ] && echo same || echo new
+  register: garbd_build
+  changed_when: garbd_build.stdout == 'new'
+
+- name: garbd unit
+  ansible.builtin.template:
+    src: webstore-garbd.container.j2
+    dest: /etc/containers/systemd/webstore-garbd.container
+    mode: "0644"
+  register: garbd_unit
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: garbd_unit is changed
+
+- name: garbd running
+  ansible.builtin.systemd:
+    name: webstore-garbd.service
+    state: "{{ 'restarted' if (garbd_unit is changed or garbd_build is changed) else 'started' }}"

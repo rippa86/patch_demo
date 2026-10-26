@@ -1,0 +1,75 @@
+---
+# Push real writes through the shop (HAProxy) and count which Galera node they came from.
+# Each step writes to MariaDB: login (session), cart update, cart clear, logout.
+# Sets: probe_delta = {node: write-sets originated during the probe}
+- name: Write counters before
+  ansible.builtin.include_tasks: galera_status.yml
+  loop: "{{ db_nodes_up }}"
+  loop_control: { loop_var: node }
+
+- name: Remember counters
+  ansible.builtin.set_fact:
+    _before: >-
+      {% set d = {} %}{% for n in db_nodes_up %}{% set _ = d.update({n: gs[n].wsrep_replicated | default(0) | int}) %}{% endfor %}{{ d }}
+
+- name: TVT account exists
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/account"
+    method: POST
+    body_format: json
+    body: { username: "{{ tvt_user }}", password: "{{ lab_password }}", email: "{{ tvt_user }}@{{ lab_domain }}" }
+    status_code: [200, 409]
+  no_log: true
+
+- name: Log in as the TVT user (writes a session)
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/login"
+    method: POST
+    body_format: json
+    body: { username: "{{ tvt_user }}", password: "{{ lab_password }}" }
+  register: _login
+  no_log: true
+
+- name: Products
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/cart/products"
+  register: _products
+
+- name: Put an item in the cart (write)
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/cart"
+    method: PUT
+    headers: { Authorization: "Bearer {{ _login.json.token }}" }
+    body_format: json
+    body: { items: [{ product_id: "{{ _products.json[0].id }}", qty: 1 }] }
+
+- name: Read the cart back
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/cart"
+    headers: { Authorization: "Bearer {{ _login.json.token }}" }
+  register: _cart
+  failed_when: _cart.json['items'] | length != 1
+
+- name: Empty the cart (write, leaves stock untouched)
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/cart"
+    method: PUT
+    headers: { Authorization: "Bearer {{ _login.json.token }}" }
+    body_format: json
+    body: { items: [] }
+
+- name: Log out (write)
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/logout"
+    method: POST
+    headers: { Authorization: "Bearer {{ _login.json.token }}" }
+
+- name: Write counters after
+  ansible.builtin.include_tasks: galera_status.yml
+  loop: "{{ db_nodes_up }}"
+  loop_control: { loop_var: node }
+
+- name: Writes per node during the probe
+  ansible.builtin.set_fact:
+    probe_delta: >-
+      {% set d = {} %}{% for n in db_nodes_up %}{% set _ = d.update({n: (gs[n].wsrep_replicated | default(0) | int) - _before[n]}) %}{% endfor %}{{ d }}

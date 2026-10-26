@@ -1,0 +1,7 @@
+# Managed by Ansible (roles/shop_apps). Mounted into webstore-httpd.
+ProxyPreserveHost On
+ProxyTimeout 30
+{% for be in haproxy_api_backends %}
+ProxyPass        {{ be.path }} http://host.containers.internal:{{ be.port }}{{ be.path }}
+ProxyPassReverse {{ be.path }} http://host.containers.internal:{{ be.port }}{{ be.path }}
+{% endfor %}

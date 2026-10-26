@@ -1,0 +1,16 @@
+# Managed by Ansible (roles/ops_garbd).
+[Unit]
+Description=webstore Galera arbitrator
+After=network-online.target
+
+[Container]
+Image=localhost/webstore-garbd:1.0
+ContainerName=webstore-garbd
+Network=host
+Exec=-n garbd-{{ ops_name }} -g {{ galera_cluster_name }} -a gcomm://{{ frontend1_ip }}:4567,{{ frontend2_ip }}:4567 -l /dev/stderr
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

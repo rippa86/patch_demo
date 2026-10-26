@@ -1,0 +1,48 @@
+---
+# Start MariaDB on the target, let it resync (IST, or SST if it was away too
+# long), then bring its backend/APIs/httpd back. Runs on demo-vm, acts on target.
+
+- name: Remove stale SST leftovers (only while MariaDB is stopped)
+  ansible.builtin.shell: |
+    if systemctl is-active -q webstore-mariadb.service; then echo running; exit 0; fi
+    mp=$(podman volume inspect webstore-mariadb-data --format '{{ '{{' }}.Mountpoint{{ '}}' }}' 2>/dev/null) || exit 0
+    for f in "$mp/wsrep_sst.pid" "$mp/sst_in_progress" "$mp/.sst"; do [ -e "$f" ] && rm -rf "$f" && echo "removed $f"; done; true
+  delegate_to: "{{ target }}"
+  register: _sst
+  changed_when: "'removed' in _sst.stdout"
+
+- name: Start MariaDB on {{ target_name }}
+  ansible.builtin.systemd:
+    name: webstore-mariadb.service
+    state: started
+  delegate_to: "{{ target }}"
+
+- name: Wait until {{ target_name }} is Synced with the cluster
+  ansible.builtin.shell: |
+    podman exec webstore-mariadb mariadb -uroot -p"$PW" -Nse \
+      "SHOW STATUS WHERE Variable_name IN ('wsrep_cluster_status','wsrep_local_state_comment')" 2>/dev/null
+  environment:
+    PW: "{{ lab_password }}"
+  delegate_to: "{{ target }}"
+  register: _sync
+  until: "'Primary' in _sync.stdout and 'Synced' in _sync.stdout"
+  retries: 120
+  delay: 5
+  changed_when: false
+
+- name: Backend, APIs and httpd on {{ target_name }}
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+  loop: "{{ ['webstore-backend.service'] + shop_api_units + ['webstore-httpd.service'] }}"
+  delegate_to: "{{ target }}"
+
+- name: Health checks on {{ target_name }}
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ item }}"
+  loop: [8001/healthz, 8080/healthz.txt, 8010/healthz, 8011/healthz, 8012/healthz, 8013/healthz, 8014/healthz, 8015/healthz]
+  delegate_to: "{{ target }}"
+  register: _h
+  until: _h.status == 200
+  retries: 30
+  delay: 3

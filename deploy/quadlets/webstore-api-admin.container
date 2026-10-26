@@ -1,0 +1,16 @@
+[Unit]
+Description=webstore api-admin
+After=webstore-backend.service
+
+[Container]
+Image=localhost/webstore-api-admin:1.0
+ContainerName=webstore-api-admin
+Network=webstore-net.network
+PublishPort=8015:8015
+EnvironmentFile=/etc/webstore/webstore.env
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+---
+# fw_rules: list of [port/proto, source]. Empty source = open to everyone.
+# Adds to the runtime AND permanent config without `firewall-cmd --reload`,
+# so Podman's published-port rules are left alone.
+- name: "Firewall: {{ item.0 }} from {{ item.1 or 'anywhere' }}"
+  ansible.builtin.shell: |
+    set -e
+    port="{{ item.0.split('/')[0] }}"; proto="{{ item.0.split('/')[1] }}"; src="{{ item.1 }}"
+    if [ -n "$src" ]; then
+      rule="rule family=\"ipv4\" source address=\"$src\" port port=\"$port\" protocol=\"$proto\" accept"
+      q() { firewall-cmd "$@" --query-rich-rule="$rule"; }
+      a() { firewall-cmd "$@" --add-rich-rule="$rule"; }
+    else
+      q() { firewall-cmd "$@" --query-port="$port/$proto"; }
+      a() { firewall-cmd "$@" --add-port="$port/$proto"; }
+    fi
+    changed=no
+    q --permanent >/dev/null 2>&1 || { a --permanent >/dev/null; changed=yes; }
+    q >/dev/null 2>&1 || { a >/dev/null; changed=yes; }
+    echo "$changed"
+  register: fw
+  changed_when: fw.stdout == 'yes'
+  loop: "{{ fw_rules }}"

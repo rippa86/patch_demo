@@ -1,0 +1,156 @@
+---
+# Exporter -> Prometheus (127.0.0.1:9091) -> Grafana (:{{ grafana_port }}), all on demo-vm.
+
+- name: Config directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/webstore/monitoring
+    - /etc/webstore/monitoring/prometheus
+    - /etc/webstore/monitoring/grafana
+
+- name: Exporter settings
+  ansible.builtin.template:
+    src: monitoring.env.j2
+    dest: /etc/webstore/monitoring.env
+    mode: "0600"
+  register: mon_env
+  no_log: true
+
+- name: Grafana settings
+  ansible.builtin.template:
+    src: grafana.env.j2
+    dest: /etc/webstore/grafana.env
+    mode: "0600"
+  register: graf_env
+  no_log: true
+
+- name: demo-vm webstore.env (synth-users)
+  ansible.builtin.template:
+    src: webstore.env.j2
+    dest: /etc/webstore/webstore.env
+    mode: "0600"
+  no_log: true
+
+- name: Prometheus config
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/monitoring/prometheus/prometheus.yml"
+    dest: /etc/webstore/monitoring/prometheus/prometheus.yml
+    mode: "0644"
+  register: prom_cfg
+
+- name: Grafana provisioning and dashboard
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/monitoring/grafana/"
+    dest: /etc/webstore/monitoring/grafana/
+    mode: "0644"
+    directory_mode: "0755"
+  register: graf_prov
+
+- name: Monitoring units
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/monitoring/quadlets/{{ item }}"
+    dest: /etc/containers/systemd/{{ item }}
+    mode: "0644"
+  loop: [webstore-exporter.container, webstore-prometheus.container, webstore-grafana.container]
+  register: mon_units
+
+- name: Build the exporter image
+  ansible.builtin.shell: |
+    set -e
+    tag=localhost/webstore-exporter:1.0
+    before=$(podman image inspect --format '{{ '{{' }}.Id{{ '}}' }}' "$tag" 2>/dev/null || true)
+    podman build -q -t "$tag" {{ repo_dest }}/monitoring/exporter >/dev/null
+    after=$(podman image inspect --format '{{ '{{' }}.Id{{ '}}' }}' "$tag")
+    [ "$before" = "$after" ] && echo same || echo new
+  register: exporter_build
+  changed_when: exporter_build.stdout == 'new'
+
+- name: Pull Prometheus and Grafana images
+  ansible.builtin.shell: |
+    podman image exists {{ item }} && echo present || { podman pull -q {{ item }} >/dev/null; echo pulled; }
+  loop:
+    - quay.io/prometheus/prometheus:v2.55.1
+    - docker.io/grafana/grafana-oss:11.6.0
+  register: mon_pull
+  changed_when: "'pulled' in mon_pull.stdout"
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: mon_units is changed
+
+- name: Exporter
+  ansible.builtin.systemd:
+    name: webstore-exporter.service
+    state: "{{ 'restarted' if (mon_env is changed or exporter_build is changed or mon_units is changed) else 'started' }}"
+
+- name: Prometheus
+  ansible.builtin.systemd:
+    name: webstore-prometheus.service
+    state: "{{ 'restarted' if (prom_cfg is changed or mon_units is changed) else 'started' }}"
+
+- name: Grafana
+  ansible.builtin.systemd:
+    name: webstore-grafana.service
+    state: "{{ 'restarted' if (graf_env is changed or graf_prov is changed or mon_units is changed) else 'started' }}"
+
+- name: Wait for Grafana
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+  register: graf_health
+  until: graf_health.status == 200
+  retries: 40
+  delay: 3
+
+# GF_SECURITY_ADMIN_PASSWORD only applies to a brand-new Grafana database.
+- name: Grafana admin password = lab_password
+  ansible.builtin.shell: |
+    if curl -sf -u "admin:$PW" http://127.0.0.1:{{ grafana_port }}/api/user >/dev/null; then echo ok; else
+      podman exec webstore-grafana grafana cli admin reset-admin-password "$PW" >/dev/null; echo reset; fi
+  environment:
+    PW: "{{ lab_password }}"
+  register: graf_pw
+  changed_when: graf_pw.stdout == 'reset'
+
+# --- Old pieces ----------------------------------------------------------------
+- name: Retire the old browser dashboard (replaced by Grafana)
+  when: remove_legacy_dashboard
+  block:
+    - name: Stop webstore-httpd-dash
+      ansible.builtin.systemd:
+        name: webstore-httpd-dash.service
+        state: stopped
+      failed_when: false
+    - name: Remove its unit
+      ansible.builtin.file:
+        path: /etc/containers/systemd/webstore-httpd-dash.container
+        state: absent
+      register: dash_removed
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: dash_removed is changed
+
+- name: Synthetic users (optional)
+  when: synth_users_enabled
+  block:
+    - name: Build synth-users image
+      ansible.builtin.command: podman build -q -t localhost/webstore-synth-users:1.0 {{ repo_dest }}/synth-users
+      changed_when: false
+    - name: synth-users unit
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/deploy/quadlets/webstore-synth-users.container"
+        dest: /etc/containers/systemd/webstore-synth-users.container
+        mode: "0644"
+      register: synth_unit
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: synth_unit is changed
+    - name: synth-users running
+      ansible.builtin.systemd:
+        name: webstore-synth-users.service
+        state: started

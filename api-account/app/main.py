@@ -15,6 +15,13 @@ LDAP_SERVICE_DN = os.environ.get(
 LDAP_API_PASSWORD = os.environ.get("LDAP_API_PASSWORD", "")
 PEOPLE_OU = os.environ.get("LDAP_PEOPLE_OU", "ou=People,dc=webstore,dc=local")
 USER_RE = re.compile(r"^[A-Za-z0-9._-]{3,32}$")
+# Names that can only be created by an operator (deploy/ldap/create-admin.sh),
+# so nobody can self-register "admin" and inherit the admin role.
+RESERVED_USERNAMES = {
+    u.strip().lower()
+    for u in os.environ.get("RESERVED_USERNAMES", "admin,administrator,root,api").split(",")
+    if u.strip()
+}
 
 app = FastAPI(title="webstore-api-account")
 
@@ -68,6 +75,8 @@ def create_account(body: AccountIn) -> dict:
     username = body.username.strip()
     if not USER_RE.match(username):
         raise HTTPException(status_code=400, detail="invalid username")
+    if username.lower() in RESERVED_USERNAMES:
+        raise HTTPException(status_code=403, detail="username is reserved")
     dn = f"uid={username},{PEOPLE_OU}"
     attrs = {
         "objectClass": ["inetOrgPerson", "organizationalPerson", "person", "top"],

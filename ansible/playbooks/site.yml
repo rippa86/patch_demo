@@ -1,0 +1,90 @@
+---
+# Build or converge the whole lab:
+#   cd ansible
+#   ansible-playbook playbooks/site.yml -e lab_password='...'
+#
+# Safe to re-run on a working lab: every step checks before it changes anything.
+
+- name: Common (hosts file, packages, time, firewall, code)
+  hosts: webstore
+  become: true
+  roles: [common]
+
+- name: 389 Directory Server with replication
+  hosts: webstore_shop
+  become: true
+  roles: [ldap]
+
+- name: Shop config, container units and images
+  hosts: webstore_shop
+  become: true
+  tasks:
+    - name: Shop config
+      ansible.builtin.include_role:
+        name: shop_apps
+        tasks_from: config
+
+- name: MariaDB Galera cluster
+  hosts: webstore_shop
+  become: true
+  roles: [galera]
+
+- name: Rolling MariaDB restart (only if galera.cnf changed)
+  hosts: webstore_shop
+  become: true
+  serial: 1
+  tasks:
+    - name: Rolling restart
+      ansible.builtin.include_role:
+        name: galera
+        tasks_from: rolling
+
+- name: Shop services
+  hosts: webstore_shop
+  become: true
+  tasks:
+    - name: Start shop services
+      ansible.builtin.include_role:
+        name: shop_apps
+        tasks_from: start
+
+- name: demo-vm - Galera arbitrator, HAProxy, monitoring
+  hosts: webstore_ops
+  become: true
+  roles: [ops_garbd, ops_haproxy, ops_monitoring]
+
+- name: Read-only MariaDB user for the exporter
+  hosts: webstore_shop
+  become: true
+  gather_facts: false
+  tasks:
+    - name: monitor@{{ ops_ip }}
+      ansible.builtin.shell: |
+        set -e
+        sql() { podman exec -i webstore-mariadb mariadb -uroot -p"$PW" -N "$@"; }
+        n=$(echo "SELECT COUNT(*) FROM mysql.user WHERE user='monitor' AND host='{{ ops_ip }}'" | sql)
+        sql <<SQL
+        CREATE USER IF NOT EXISTS 'monitor'@'{{ ops_ip }}' IDENTIFIED BY '$PW';
+        ALTER USER 'monitor'@'{{ ops_ip }}' IDENTIFIED BY '$PW';
+        GRANT SELECT ON webstore.* TO 'monitor'@'{{ ops_ip }}';
+        SQL
+        [ "$n" = 0 ] && echo created || echo exists
+      environment:
+        PW: "{{ lab_password }}"
+      register: monitor_user
+      changed_when: monitor_user.stdout == 'created'
+      when: inventory_hostname == frontend1_fqdn
+
+- name: Test accounts user1..user100
+  hosts: webstore_ops
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create test accounts through the shop (existing ones are skipped)
+      ansible.builtin.command: python3 {{ repo_dest }}/tools/create_accounts.py --base-url http://{{ shop_vip_ip }}
+      register: seed
+      changed_when: seed.stdout is search('Done. [1-9]')
+      when: seed_test_users
+
+- name: Smoke test
+  ansible.builtin.import_playbook: smoke.yml

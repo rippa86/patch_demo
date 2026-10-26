@@ -1,0 +1,39 @@
+---
+- name: Exporter metrics
+  ansible.builtin.uri:
+    url: http://127.0.0.1:9200/metrics
+    return_content: true
+  register: _m
+
+- name: Exporter can see HAProxy, the database and LDAP
+  ansible.builtin.assert:
+    that:
+      - _m.content is search('(?m)^webstore_haproxy_up 1')
+      - _m.content is search('(?m)^webstore_shop_data_source\{')
+      - _m.content is search('(?m)^webstore_ldap_up\{[^}]*\} 1')
+    fail_msg: "Exporter is missing data; see journalctl -u webstore-exporter on {{ ops_name }}"
+
+- name: Prometheus is ready and scraping the exporter
+  ansible.builtin.uri:
+    url: http://127.0.0.1:9091/api/v1/query?query=up%7Bjob%3D%22webstore%22%7D
+  register: _pq
+  failed_when: (_pq.json.data.result | map(attribute='value') | map('last') | list) != ['1']
+
+- name: Grafana health
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+
+- name: Dashboard is provisioned
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ grafana_port }}/api/dashboards/uid/webstore-overview"
+    url_username: admin
+    url_password: "{{ lab_password }}"
+    force_basic_auth: true
+  no_log: true
+
+- name: Record
+  ansible.builtin.include_tasks: record.yml
+  vars:
+    r_check: Monitoring
+    r_status: PASS
+    r_detail: "exporter sees HAProxy/DB/LDAP, Prometheus scraping, Grafana up with Webstore - Overview"

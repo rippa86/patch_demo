@@ -1,0 +1,15 @@
+[Unit]
+Description=webstore metrics exporter (HAProxy, Galera, LDAP, sessions)
+After=network-online.target haproxy.service
+
+[Container]
+Image=localhost/webstore-exporter:1.0
+ContainerName=webstore-exporter
+Network=host
+EnvironmentFile=/etc/webstore/monitoring.env
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

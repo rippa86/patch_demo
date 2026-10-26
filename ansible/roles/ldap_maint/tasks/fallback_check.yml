@@ -1,0 +1,20 @@
+---
+# The target's login/account APIs must know the peer's LDAP, or stopping the
+# target's LDAP would break them. Reads the env of the RUNNING containers.
+- name: LDAP settings inside {{ target_name }}'s login and account containers
+  ansible.builtin.shell: |
+    for c in webstore-api-login webstore-api-account; do
+      echo "$c $(podman exec $c printenv LDAP_PEER_URL 2>/dev/null)"
+    done
+  delegate_to: "{{ target }}"
+  register: _peer_urls
+  changed_when: false
+
+- name: Both must fall back to {{ peer_name }} ({{ hostvars[peer].node_ip }})
+  ansible.builtin.assert:
+    that: _peer_urls.stdout_lines | reject('search', 'ldap://' ~ hostvars[peer].node_ip ~ ':389') | list | length == 0
+    fail_msg: >-
+      {{ target_name }}'s APIs have no LDAP fallback to {{ peer_name }}:
+      {{ _peer_urls.stdout_lines }}. Run playbooks/site.yml (it sets LDAP_PEER_URL),
+      or set LDAP_PEER_URL=ldap://{{ hostvars[peer].node_ip }}:389 in /etc/webstore/webstore.env
+      on {{ target_name }} and restart its webstore-api-* services.

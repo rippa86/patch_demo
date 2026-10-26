@@ -9,3 +9,4 @@ ansible/inventory.ini
 deploy/env
 /etc/
 *.log
+ansible/group_vars/all/vault.yml

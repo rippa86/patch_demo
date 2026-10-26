@@ -1,0 +1,36 @@
+---
+- name: Which nodes are in service
+  ansible.builtin.include_tasks: in_service.yml
+
+- name: "Health checks on each node (directly, not via HAProxy)"
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ item.1 }}"
+    timeout: 5
+  delegate_to: "{{ item.0 }}"
+  loop: "{{ groups['webstore_shop'] | product(['8001/healthz', '8080/healthz.txt', '8010/healthz', '8011/healthz', '8012/healthz', '8013/healthz', '8014/healthz', '8015/healthz']) | list }}"
+  loop_control:
+    label: "{{ hostvars[item.0].node_name }}:{{ item.1 }}"
+  register: _nh
+  failed_when: false
+
+- name: Which failed
+  ansible.builtin.set_fact:
+    _nh_bad: "{{ _nh.results | rejectattr('status', 'equalto', 200) | map(attribute='item') | map('join', ':') | map('regex_replace', '\\.' ~ lab_domain | regex_escape, '') | list }}"
+
+- name: Failures on nodes that are serving traffic
+  ansible.builtin.set_fact:
+    _nh_bad_live: "{{ _nh.results | rejectattr('status', 'equalto', 200) | map(attribute='item') | selectattr('0', 'in', _in_service) | map('join', ':') | list }}"
+
+- name: Every service on every in-service node answers
+  ansible.builtin.assert:
+    that: _nh_bad_live | length == 0
+    fail_msg: "Not healthy on a node that is serving traffic: {{ _nh_bad_live }}"
+
+- name: Record
+  ansible.builtin.include_tasks: record.yml
+  vars:
+    r_check: Nodes
+    r_status: "{{ 'WARN' if _nh_bad else 'PASS' }}"
+    r_detail: >-
+      {{ 'all ' ~ (_nh.results | length) ~ ' health checks OK' if not _nh_bad else
+         'down on nodes in maintenance: ' ~ _nh_bad | join(', ') }}

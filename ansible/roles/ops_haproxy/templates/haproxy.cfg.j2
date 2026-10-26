@@ -1,0 +1,66 @@
+# Managed by Ansible (roles/ops_haproxy). Edit ansible/group_vars/all/main.yml instead.
+global
+    log         127.0.0.1 local2
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon
+    stats socket {{ haproxy_socket }} mode 660 level admin expose-fd listeners
+    stats timeout 30s
+    ssl-default-bind-ciphers PROFILE=SYSTEM
+    ssl-default-server-ciphers PROFILE=SYSTEM
+
+defaults
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option                  http-server-close
+    option                  forwardfor except 127.0.0.0/8
+    option                  redispatch
+    retries                 3
+    timeout http-request    10s
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+    timeout http-keep-alive 10s
+    timeout check           5s
+    maxconn                 3000
+    default-server          check inter 2s fall 3 rise 2
+
+# Stats page: http://{{ ops_ip }}:{{ haproxy_stats_port }}/   (CSV for the exporter: /;csv)
+listen stats
+    bind *:{{ haproxy_stats_port }}
+    stats enable
+    stats uri /
+    stats refresh 5s
+
+# Shop: http://{{ shop_vip_dns }}/  ->  {{ shop_vip_ip }}:80
+frontend http_in
+    bind {{ shop_vip_ip }}:80
+{% for be in haproxy_api_backends %}
+    acl is_{{ be.name }} path_beg {{ be.path }}
+    use_backend {{ be.name }} if is_{{ be.name }}
+{% endfor %}
+    default_backend {{ haproxy_web_backend.name }}
+
+backend {{ haproxy_web_backend.name }}
+    balance roundrobin
+    option httpchk GET {{ haproxy_web_backend.check }}
+    http-check expect status 200
+{% for n in shop_nodes %}
+    server {{ n.name }} {{ n.ip }}:{{ haproxy_web_backend.port }}
+{% endfor %}
+{% for be in haproxy_api_backends %}
+
+backend {{ be.name }}
+    balance roundrobin
+    option httpchk GET {{ be.check }}
+    http-check expect status 200
+{% for n in shop_nodes %}
+    server {{ n.name }} {{ n.ip }}:{{ be.port }}
+{% endfor %}
+{% endfor %}

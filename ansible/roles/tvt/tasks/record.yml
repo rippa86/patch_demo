@@ -1,0 +1,5 @@
+---
+# Append one line to the report. vars: r_check, r_status (PASS|WARN|FAIL), r_detail
+- name: "Report: {{ r_check }} {{ r_status }}"
+  ansible.builtin.set_fact:
+    tvt_results: "{{ tvt_results | default([]) + [{'check': r_check, 'status': r_status, 'detail': r_detail | string | truncate(300)}] }}"

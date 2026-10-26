@@ -1,11 +1,11 @@
 ---
-- name: Set HAProxy server state
+# Set one shop node's state in every HAProxy backend (runs on demo-vm).
+# vars: haproxy_server (HAProxy server name, e.g. web-frontend1), haproxy_state (ready|drain|maint)
+- name: "HAProxy: {{ haproxy_server }} -> {{ haproxy_state }}"
   ansible.builtin.shell: |
     set -e
     for be in {{ haproxy_backends | join(' ') }}; do
       echo "set server ${be}/{{ haproxy_server }} state {{ haproxy_state }}" \
-        | socat stdio {{ haproxy_socket }}
+        | socat stdio unix-connect:{{ haproxy_socket }}
     done
-  args:
-    executable: /bin/bash
   changed_when: true

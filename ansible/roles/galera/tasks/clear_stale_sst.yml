@@ -1,0 +1,19 @@
+---
+# An interrupted SST leaves wsrep_sst.pid behind; inside a container the PID
+# gets reused, so the next SST waits forever ("Previous SST is not completed").
+- name: Stop MariaDB before touching its datadir
+  ansible.builtin.systemd:
+    name: webstore-mariadb.service
+    state: stopped
+  failed_when: false
+
+- name: Remove stale SST leftovers
+  ansible.builtin.shell: |
+    mp=$(podman volume inspect webstore-mariadb-data --format '{{ '{{' }}.Mountpoint{{ '}}' }}' 2>/dev/null) || exit 0
+    found=""
+    for f in "$mp/wsrep_sst.pid" "$mp/sst_in_progress" "$mp/.sst"; do
+      [ -e "$f" ] && { rm -rf "$f"; found="$found $f"; }
+    done
+    echo "$found"
+  register: sst_clean
+  changed_when: sst_clean.stdout | trim | length > 0

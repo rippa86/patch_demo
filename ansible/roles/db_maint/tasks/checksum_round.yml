@@ -1,0 +1,68 @@
+---
+# One attempt for checksums.yml (vars: ck_round)
+- name: "Read every node at the same moment (attempt {{ ck_round }})"
+  ansible.builtin.shell: |
+    podman exec webstore-mariadb mariadb -uroot -p"$PW" -N -e "
+      SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME='WSREP_LAST_COMMITTED';
+      START TRANSACTION WITH CONSISTENT SNAPSHOT;
+      SELECT CONCAT(COUNT(*),':',COALESCE(SUM(CRC32(CONCAT_WS('#',id,sku,name,description,price_cents))),0)) FROM webstore.products;
+      SELECT CONCAT(COUNT(*),':',COALESCE(SUM(CRC32(CONCAT_WS('#',id,stock))),0)) FROM webstore.products;
+      SELECT CONCAT(COUNT(*),':',COALESCE(SUM(CRC32(CONCAT_WS('#',uid,created_at))),0)) FROM webstore.admins;
+      COMMIT;
+      SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME='WSREP_LAST_COMMITTED';" 2>/dev/null
+  environment:
+    PW: "{{ lab_password }}"
+  delegate_to: "{{ item }}"
+  loop: "{{ db_nodes_up }}"
+  register: _ck_jobs
+  async: 60
+  poll: 0
+  changed_when: false
+
+- name: Collect
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  delegate_to: "{{ item.item }}"
+  loop: "{{ _ck_jobs.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: _ck
+  until: _ck.finished
+  retries: 30
+  delay: 1
+
+- name: Evaluate
+  ansible.builtin.set_fact:
+    db_checksums: >-
+      {% set d = {} %}{% for r in _ck.results %}{% set l = r.stdout_lines | default([]) %}
+      {%- set _ = d.update({r.item.item: (l[1:4] | join(',')) if l | length == 5 else 'unreadable'}) %}{% endfor %}{{ d }}
+    _ck_pos: >-
+      {% set d = {} %}{% for r in _ck.results %}{% set l = r.stdout_lines | default([]) %}
+      {%- set _ = d.update({r.item.item: [l[0], l[4]] if l | length == 5 else ['?', '!']}) %}{% endfor %}{{ d }}
+
+- name: Same position on every node and nothing committed during the reads?
+  ansible.builtin.set_fact:
+    _ck_settled: >-
+      {{ _ck_pos.values() | rejectattr('0', 'equalto', None) | list | length == _ck_pos | length and
+         _ck_pos.values() | map('first') | unique | list | length == 1 and
+         _ck_pos.values() | map('last') | unique | list | length == 1 and
+         (_ck_pos.values() | first)[0] == (_ck_pos.values() | first)[1] }}
+    _ck_writes: >-
+      {{ _ck_writes | int + (_ck_pos.values() | map('last') | map('int') | max)
+                           - (_ck_pos.values() | map('first') | map('int') | min)
+         if '?' not in (_ck_pos.values() | map('first') | list) else _ck_writes }}
+
+- name: Verdict
+  ansible.builtin.set_fact:
+    db_check: "{{ 'match' if db_checksums.values() | unique | list | length == 1 else 'diverged' }}"
+    db_check_note: >-
+      {{ ('data identical at Galera position ' ~ (_ck_pos.values() | first)[0])
+         if db_checksums.values() | unique | list | length == 1
+         else ('DATA DIFFERS at the same Galera position ' ~ (_ck_pos.values() | first)[0]
+               ~ ' (catalog,stock,admins): ' ~ db_checksums) }}
+  when: _ck_settled | bool and 'unreadable' not in db_checksums.values()
+
+- name: Not this time - wait and try again
+  ansible.builtin.pause:
+    seconds: 2
+  when: db_check == '' and ck_round | int < ck_rounds | default(6) | int

@@ -1,5 +1,13 @@
-FROM mariadb:11.4.5
+FROM docker.io/library/mariadb:11.4.5
 USER 0
+# mariadb-server pulls Galera libraries but not always the garbd binary.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends galera-4 \
+    && if [ ! -x /usr/bin/garbd ]; then \
+         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends galera-arbitrator-4; \
+       fi \
+    && test -x /usr/bin/garbd \
+    && rm -rf /var/lib/apt/lists/*
 EXPOSE 4567
-ENTRYPOINT ["garbd"]
-CMD ["-n", "garbd-demo-vm", "-g", "webstore", "-a", "gcomm://10.10.4.115:4567,10.10.4.116:4567"]
+ENTRYPOINT ["/usr/bin/garbd"]
+CMD ["-n", "garbd-demo-vm", "-g", "webstore", "-a", "gcomm://10.10.4.115:4567,10.10.4.116:4567", "-l", "/dev/stderr"]

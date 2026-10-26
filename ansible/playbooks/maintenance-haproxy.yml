@@ -1,0 +1,262 @@
+---
+# Take ONE shop node out of HAProxy (on demo-vm) and put it back. Only HAProxy is
+# touched: the node's containers and its database keep running.
+#
+#   remove_haproxy   1. Refuse unless the other node is UP in every backend (it takes all traffic)
+#                    2. DRAIN the target in every backend: no new connections, existing ones finish
+#                    3. Wait until it has no open connections (bleed), up to drain_timeout seconds
+#                    4. MAINT the target in every backend, then check the shop still answers
+#   restore_haproxy  1. Refuse unless the target's own services pass their health checks
+#                    2. READY the target in every backend and wait until HAProxy marks it UP
+#                    3. Check the shop answers and both nodes now get requests
+#
+# Examples (from ansible/):
+#   ansible-playbook playbooks/maintenance-haproxy.yml -e target=web-frontend1.lab.rippa.io -e remove_haproxy=true
+#   ansible-playbook playbooks/maintenance-haproxy.yml -e target=web-frontend1.lab.rippa.io -e restore_haproxy=true
+#
+# Options: -e drain_timeout=120 (seconds to wait for connections), -e force_remove=true
+# (go to MAINT even if connections remain after the timeout).
+
+- name: HAProxy maintenance for {{ target | default('(set -e target=...)') }}
+  hosts: webstore_ops
+  become: true
+  gather_facts: false
+  vars:
+    ms_playbook: maintenance-haproxy
+    do_remove: "{{ remove_haproxy | default(false) | bool }}"
+    do_restore: "{{ restore_haproxy | default(false) | bool }}"
+    peer: "{{ groups['webstore_shop'] | difference([target]) | first }}"
+    target_name: "{{ hostvars[target].node_name }}"
+    peer_name: "{{ hostvars[peer].node_name }}"
+    shop_base: "http://{{ shop_vip_ip }}"
+    drain_timeout: 60
+
+  pre_tasks:
+    - name: Check the inventory loaded the lab settings
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: check_inventory
+
+    - name: Check the inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - target in groups['webstore_shop']
+          - do_remove != do_restore
+        fail_msg: >-
+          Use -e target=<{{ groups['webstore_shop'] | join('|') }}> and exactly one of
+          -e remove_haproxy=true or -e restore_haproxy=true
+
+    - name: Current HAProxy state
+      ansible.builtin.include_role:
+        name: db_maint
+        tasks_from: haproxy_status
+      loop: ["{{ target_name }}", "{{ peer_name }}"]
+      loop_control: { loop_var: server }
+
+    - name: Plan
+      ansible.builtin.debug:
+        msg:
+          - "{{ 'Remove' if do_remove else 'Restore' }} {{ target_name }}"
+          - "{{ target_name }}: {{ hp[target_name] }}"
+          - "{{ peer_name }}: {{ hp[peer_name] }}"
+
+  tasks:
+    # ------------------------------------------------------------------ remove_haproxy
+    - name: Remove {{ target_name }} from HAProxy
+      when: do_remove
+      block:
+        - name: The other node must be able to carry all the traffic
+          ansible.builtin.assert:
+            that: hp[peer_name].values() | reject('match', '^UP') | list | length == 0
+            fail_msg: >-
+              {{ peer_name }} is not UP in every backend ({{ hp[peer_name] }}).
+              Removing {{ target_name }} now would take part or all of the shop down.
+
+        - name: Already out?
+          ansible.builtin.set_fact:
+            already_out: "{{ hp[target_name].values() | reject('match', '^MAINT') | list | length == 0 }}"
+
+        - name: "1. DRAIN: stop sending new connections to {{ target_name }}"
+          when: not already_out
+          ansible.builtin.include_role:
+            name: haproxy_state
+          vars:
+            haproxy_server: "{{ target_name }}"
+            haproxy_state: drain
+
+        - name: "2. Bleed: wait for {{ target_name }}'s open connections to finish (max {{ drain_timeout }}s)"
+          ansible.builtin.shell: |
+            echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+              | awk -F, -v n="{{ target_name }}" 'NR > 1 && $2 == n { c += $5 } END { print c + 0 }'
+          register: _scur
+          when: not already_out
+          until: _scur.stdout | int == 0
+          retries: "{{ (drain_timeout | int / 2) | round(0, 'ceil') | int }}"
+          delay: 2
+          changed_when: false
+          failed_when: false
+
+        - name: Connections did not finish in time
+          ansible.builtin.fail:
+            msg: >-
+              {{ target_name }} still has {{ _scur.stdout }} open connection(s) after {{ drain_timeout }}s.
+              It is DRAINED (no new traffic) but not in MAINT. Wait and re-run, raise -e drain_timeout,
+              or add -e force_remove=true to cut them.
+          when:
+            - not already_out
+            - _scur.stdout | int > 0
+            - not (force_remove | default(false) | bool)
+
+        - name: "3. MAINT: take {{ target_name }} out of every backend"
+          when: not already_out
+          ansible.builtin.include_role:
+            name: haproxy_state
+          vars:
+            haproxy_server: "{{ target_name }}"
+            haproxy_state: maint
+
+        - name: State after removal
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: haproxy_status
+          loop: ["{{ target_name }}", "{{ peer_name }}"]
+          loop_control: { loop_var: server }
+
+        - name: "Check: {{ target_name }} is out, {{ peer_name }} is serving"
+          ansible.builtin.assert:
+            that:
+              - hp[target_name].values() | reject('match', '^MAINT') | list | length == 0
+              - hp[peer_name].values() | reject('match', '^UP') | list | length == 0
+            fail_msg: "{{ target_name }}={{ hp[target_name] }} {{ peer_name }}={{ hp[peer_name] }}"
+
+        - name: "Check: the shop still answers through HAProxy"
+          ansible.builtin.uri:
+            url: "{{ shop_base }}{{ item }}"
+          loop: [/, /api/cart/products]
+          register: _shop
+          until: _shop.status == 200
+          retries: 5
+          delay: 2
+
+        - name: Removed
+          ansible.builtin.debug:
+            msg:
+              - "PASS - {{ target_name }} is {{ 'already ' if already_out else '' }}in MAINT in every backend; {{ peer_name }} is serving the shop."
+              - "Its containers and database are still running. Put it back with -e restore_haproxy=true."
+
+        - name: Record remove_haproxy for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: haproxy
+            ms_action: remove_haproxy
+            ms_result: PASS
+            ms_tvt:
+              already_out: "{{ already_out }}"
+              open_connections_when_cut: "{{ _scur.stdout | default(0) | int }}"
+              forced: "{{ force_remove | default(false) | bool }}"
+              haproxy_target: "{{ hp[target_name] }}"
+              haproxy_peer: "{{ hp[peer_name] }}"
+              shop_check: passed
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: haproxy
+            ms_action: remove_haproxy
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - remove_haproxy failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+    # ------------------------------------------------------------------ restore_haproxy
+    - name: Restore {{ target_name }} to HAProxy
+      when: do_restore
+      block:
+        - name: "1. {{ target_name }}'s services must be healthy before they get traffic"
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ item }}"
+          loop: [8080/healthz.txt, 8010/healthz, 8011/healthz, 8012/healthz, 8013/healthz, 8014/healthz, 8015/healthz]
+          delegate_to: "{{ target }}"
+          register: _health
+          failed_when: false
+
+        - name: Refuse if anything is unhealthy
+          ansible.builtin.assert:
+            that: _health.results | rejectattr('status', 'equalto', 200) | list | length == 0
+            fail_msg: >-
+              Not healthy on {{ target_name }}:
+              {{ _health.results | rejectattr('status', 'equalto', 200) | map(attribute='item') | join(', ') }}.
+              Start its services first (e.g. maintenance-db.yml -e start_db_service=true).
+
+        - name: "2. READY: put {{ target_name }} back in every backend"
+          ansible.builtin.include_role:
+            name: haproxy_state
+          vars:
+            haproxy_server: "{{ target_name }}"
+            haproxy_state: ready
+
+        - name: Wait until HAProxy's health checks mark it UP everywhere
+          ansible.builtin.shell: |
+            echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+              | awk -F, -v n="{{ target_name }}" 'NR>1 && $2==n && $18 !~ /^UP/ {print $1" "$18}'
+          register: _not_up
+          until: _not_up.stdout == ''
+          retries: 20
+          delay: 3
+          changed_when: false
+
+        - name: "3. Check: the shop answers and both nodes take requests"
+          ansible.builtin.uri:
+            url: "{{ shop_base }}/"
+          loop: "{{ range(6) | list }}"
+          register: _shop
+          until: _shop.status == 200
+          retries: 5
+          delay: 2
+
+        - name: State after restore
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: haproxy_status
+          loop: ["{{ target_name }}", "{{ peer_name }}"]
+          loop_control: { loop_var: server }
+
+        - name: Restored
+          ansible.builtin.debug:
+            msg:
+              - "PASS - {{ target_name }} is UP in every backend and sharing traffic with {{ peer_name }}."
+              - "{{ target_name }}: {{ hp[target_name] }}"
+
+        - name: Record restore_haproxy for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: haproxy
+            ms_action: restore_haproxy
+            ms_result: PASS
+            ms_tvt:
+              health_checks_passed: "{{ _health.results | length }}"
+              haproxy_target: "{{ hp[target_name] }}"
+              shop_check: passed
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: haproxy
+            ms_action: restore_haproxy
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - restore_haproxy failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"

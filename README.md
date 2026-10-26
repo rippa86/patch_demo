@@ -1,186 +1,304 @@
 # Rippa Lab HA webstore
 
-Active-active shop on two RHEL 10 hosts behind a keepalived VIP, with LDAP on the host, MariaDB Galera, and an ops VM for the logged-in graph plus synthetic users.
+Active-active shop on two RHEL 10 hosts behind HAProxy on an ops VM, with 389-ds (replicated) and
+MariaDB Galera on the shop hosts, plus Prometheus/Grafana monitoring.
 
-| Role | Host | Notes |
+| Role | Host | Runs |
 | --- | --- | --- |
-| Shop node | `web-frontend1.lab.rippa.io` (**10.10.4.115**) | Full stack (httpd, APIs, backend, Galera, 389-ds, HAProxy, keepalived) |
+| Shop node | `web-frontend1.lab.rippa.io` (**10.10.4.115**) | httpd, APIs, backend, MariaDB Galera, 389-ds |
 | Shop node | `web-frontend2.lab.rippa.io` (**10.10.4.116**) | Same as web-frontend1 |
-| VIP / shop URL | `shoppingapp.lab.rippa.io` → **10.10.4.50** | Floating IP on the shop hosts, not a fourth app server |
-| Ops / quorum | `demo-vm.lab.rippa.io` (**10.10.4.108**) | Dashboard, garbd, synth-users |
+| Shop URL | `shoppingapp.lab.rippa.io` → **10.10.4.30** | Second IP on demo-vm; HAProxy listens here |
+| Ops / quorum | `demo-vm.lab.rippa.io` (**10.10.4.108**) | HAProxy, garbd, exporter, Prometheus, Grafana |
 
-Architecture details: [docs/HLD.md](docs/HLD.md). Long-form bootstrap notes: [deploy/BOOTSTRAP.md](deploy/BOOTSTRAP.md).
+All addresses, names and ports are variables in [`ansible/group_vars/all/main.yml`](ansible/group_vars/all/main.yml).
 
 ## What you get
 
-- Shop UI: create account, login, logout, cart with three products
-- Separate APIs: `/api/account`, `/api/login`, `/api/logout`, `/api/cart`
-- Ops page: live logged-in count and graph
-- Optional: 100 synthetic users logging in and out about every 30s
+- Shop: create account, login, logout, cart, checkout
+- Admin page (`/admin.html`): create products and restock (users in the `admins` table)
+- APIs behind HAProxy: `/api/account`, `/api/login`, `/api/logout`, `/api/cart`, `/api/stats`, `/api/admin`
+- Grafana on demo-vm: active users, API traffic, Galera and LDAP per node ([monitoring/](monitoring/README.md))
+- Test tools: 100 test accounts and a load generator ([tools/](tools/README.md))
 
-## Prerequisites
+## Install (or re-converge) with Ansible
 
-On a **controller** (laptop or jump host) that can SSH as root (or sudo) to all three hosts:
-
-- Git, Ansible 2.14+, Python 3
-- SSH keys for `web-frontend1`, `web-frontend2`, and `demo-vm`
-
-On **each RHEL 10 shop host** (deploy also installs most of these):
-
-- Podman, keepalived, socat, 389-ds-base, openldap-clients, rsync
-
-Confirm **10.10.4.50 is free** before starting keepalived:
+On a controller (your laptop or demo-vm) with `ansible-core` 2.14+ and SSH + sudo to the three hosts
+(RHEL 10, registered so `dnf` works):
 
 ```bash
-ping -c1 10.10.4.50
+git clone -b admin-api-and-monitoring https://github.com/rippa86/patch_demo.git
+cd patch_demo/ansible
+# hosts.ini is the inventory; add -u <user> (or ansible_user) if you don't SSH as root
+vi group_vars/all/main.yml                        # IPs, names, shop URL/IP, ports
+
+ansible-playbook playbooks/site.yml -e lab_password='YourLabPassword1'
 ```
 
-Create DNS `shoppingapp.lab.rippa.io` → `10.10.4.50`, or let deploy write `/etc/hosts` on the lab boxes.
-
-## 1. Clone and inventory
+`lab_password` is the **only** secret: MariaDB (root, app, SST, monitor), 389-ds Directory Manager,
+the LDAP `api`, `admin` and replication accounts, the JWT secret, the internal token and the Grafana
+admin all use it. Prefer a vault over the command line:
 
 ```bash
-git clone https://github.com/rippa86/patch_demo.git
-cd patch_demo
-git checkout ha-webstore   # or the branch you are deploying
-
-cd ansible
-cp inventory.ini.example inventory.ini
+cp group_vars/all/vault.yml.example group_vars/all/vault.yml   # set lab_password
+ansible-vault encrypt group_vars/all/vault.yml
+ansible-playbook playbooks/site.yml --ask-vault-pass
 ```
 
-Edit `inventory.ini` only if hostnames or IPs differ.
+What `site.yml` does, in order:
 
-## 2. Secrets
+| Step | Hosts | |
+| --- | --- | --- |
+| common | all | `/etc/hosts`, packages, chrony, firewalld rules (added live, no reload), code to `/opt/webstore` |
+| ldap | shop | 389-ds instance, base entries, `api` + `admin` users, ACI, multi-supplier replication (`meToPeer`) |
+| shop_apps (config) | shop | `webstore.env`, Podman quadlets, image builds |
+| galera | shop | Bootstrap a new cluster, or join a running one; refuses to guess if all nodes are down with data |
+| shop_apps (start) | shop | backend → APIs → httpd, each health-checked |
+| ops roles | demo-vm | garbd, shop IP + HAProxy (+ stats), exporter + Prometheus + Grafana |
+| post | | read-only `monitor` DB user, `user1..user100`, smoke test |
 
-On **all three hosts**, using the same JWT, DB, LDAP, and synth values on both shop nodes. Keep `DATABASE_URL` in sync with `MARIADB_PASSWORD`.
+It is safe to re-run on a working lab: every step checks first, and only services whose image,
+unit or settings changed are restarted. MariaDB is only restarted (one node at a time) if
+`galera.cnf` changes.
+
+**Firewall** (from `group_vars`): shop hosts open 8080, 8001, 8010–8013, 8015, 3306, 4444, 4567/tcp+udp,
+4568, 389, 636 to the lab subnet and 8014 to demo-vm only; demo-vm opens 80, 8404 and 3000 to everyone
+and 4567 to the lab subnet.
+
+**Galera after a full outage**: if no node is running but both have data, the playbook stops and
+prints each node's `seqno`. Re-run with the node that has the highest value:
 
 ```bash
-sudo mkdir -p /etc/webstore
-sudo cp deploy/env.example /etc/webstore/webstore.env
-sudo chmod 600 /etc/webstore/webstore.env
-sudo vi /etc/webstore/webstore.env
+ansible-playbook playbooks/site.yml -e galera_force_bootstrap=web-frontend2.lab.rippa.io
 ```
 
-Replace every `change-me-lab-*` value. `KEEPALIVED_PASS` must be **8 characters or fewer**.
+### In Ansible Automation Platform
 
-If you place `webstore.env` before the first deploy, Ansible will not overwrite it (`force: false`); it only fills discovered IPs.
+- **Inventory:** create it from the project (Inventories → Sources → *Sourced from a Project*,
+  inventory file `ansible/hosts.ini`). Don't add the hosts by hand: the lab settings in
+  `ansible/group_vars` and `ansible/host_vars` are only loaded with that file. Every playbook checks
+  this first and explains what to fix if it's wrong.
+- **lab_password:** a custom credential type that injects it as an extra var.
+- **Pick the node** with the `target` variable (a survey works well); leave *Limit* empty.
 
-## 3. Deploy images and unit files
-
-From `ansible/` on the controller:
-
-```bash
-ansible-playbook playbooks/deploy.yml
-```
-
-This copies sources to `/opt/webstore`, builds container images, installs Podman quadlets, templates keepalived/Galera, and prints the live shop host IPs.
-
-Apply firewall rules from [deploy/firewalld/README.md](deploy/firewalld/README.md) on the shop hosts (HTTP, VRRP, Galera/LDAP on `10.10.4.0/24`, stats port **8014** only from `10.10.4.108`). On demo-vm allow TCP 80 and Galera 4567 from the lab LAN.
-
-## 4. 389 Directory Server (each shop host)
-
-Run on **web-frontend1 and web-frontend2**:
-
-```bash
-sudo dscreate from-file /etc/webstore/instance.inf
-```
-
-If the suffix `dc=webstore,dc=local` is already there, skip `suffix.ldif`. Otherwise:
-
-```bash
-sudo ldapadd -x -H ldap://localhost -D "cn=Directory Manager" -W -f /opt/webstore/deploy/ldap/suffix.ldif
-sudo ldapadd -x -H ldap://localhost -D "cn=Directory Manager" -W -f /opt/webstore/deploy/ldap/api-user.ldif
-sudo ldapadd -x -H ldap://localhost -D "cn=Directory Manager" -W -f /opt/webstore/deploy/ldap/seed-users.ldif
-sudo ldapmodify -x -H ldap://localhost -D "cn=Directory Manager" -W -f /opt/webstore/deploy/ldap/api-aci.ldif
-
-set -a && source /etc/webstore/webstore.env && set +a
-sudo ldappasswd -x -H ldap://localhost -D "cn=Directory Manager" -w "$LDAP_MANAGER_PASSWORD" \
-  -s "$LDAP_API_PASSWORD" "uid=api,ou=Services,dc=webstore,dc=local"
-
-sudo dsconf webstore config replace nsslapd-listenhost=0.0.0.0
-sudo systemctl enable --now dirsrv@webstore
-```
-
-Enable multi-master replication (`replica-id 1` on web-frontend1, `2` on web-frontend2) using [deploy/ldap/mmr.md](deploy/ldap/mmr.md).
-
-## 5. Galera
-
-Bootstrap **web-frontend1 only**, then join web-frontend2 and garbd:
-
-```bash
-cd ansible
-ansible-playbook playbooks/galera-bootstrap.yml
-ansible-playbook playbooks/galera-join.yml
-```
-
-On a shop host:
-
-```bash
-sudo podman exec webstore-mariadb mysql -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
-```
-
-Expect **3** (web-frontend1, web-frontend2, garbd).
-
-## 6. Start the shop
-
-On **each** of web-frontend1 and web-frontend2:
-
-```bash
-sudo systemctl enable --now \
-  webstore-backend.service \
-  webstore-api-account.service \
-  webstore-api-login.service \
-  webstore-api-logout.service \
-  webstore-api-cart.service \
-  webstore-api-stats.service \
-  webstore-httpd.service \
-  webstore-haproxy.service \
-  keepalived.service
-```
-
-On **demo-vm**:
-
-```bash
-sudo systemctl enable --now webstore-httpd-dash.service
-```
-
-After the VIP answers HTTP, start synthetic logins:
-
-```bash
-sudo systemctl enable --now webstore-synth-users.service
-```
-
-## 7. Check it
+## Check it
 
 | Page | URL |
 | --- | --- |
 | Shop | http://shoppingapp.lab.rippa.io/ |
-| Create account | http://shoppingapp.lab.rippa.io/account.html |
-| Logged-in graph | http://demo-vm.lab.rippa.io/ |
+| Admin (catalog) | http://shoppingapp.lab.rippa.io/admin.html (`admin` / lab_password) |
+| HAProxy stats | http://demo-vm.lab.rippa.io:8404/ |
+| Grafana | http://demo-vm.lab.rippa.io:3000/ (anonymous view; `admin` / lab_password to edit) |
+
+```bash
+ansible-playbook playbooks/smoke.yml -e lab_password='...'
+```
+
+## Admin user
+
+The admin login lives in LDAP like every other user; the **role** lives in MariaDB
+(`admins` table, seeded at backend start from `ADMIN_USERS`, default `admin`).
+`api-account` refuses to register reserved names (`RESERVED_USERNAMES`), so nobody can
+sign up as `admin` and inherit the role.
+
+`site.yml` creates the `admin` LDAP account with `lab_password`; sign in at `/admin.html`.
+(Without Ansible: `deploy/ldap/create-admin.sh` on web-frontend1 does the same.)
+
+| Endpoint (JWT from `/api/login`, admin only) | Does |
+| --- | --- |
+| `GET /api/admin/me` | 200 if the caller is an admin, 403 otherwise |
+| `GET /api/admin/products` | Catalog with stock |
+| `POST /api/admin/products` `{sku, name, description, price_cents, stock}` | Create a product (409 on duplicate SKU) |
+| `POST /api/admin/products/{id}/restock` `{qty}` | Add stock atomically |
+| `GET /api/admin/inventory-log` | Who created/restocked what, newest first |
+
+Grant or revoke admins in SQL; it takes effect on the next request:
+
+```sql
+INSERT INTO webstore.admins (uid) VALUES ('alice');
+DELETE FROM webstore.admins WHERE uid = 'alice';
+```
+
+## TVT: check the whole lab any time
+
+`playbooks/tvt.yml` runs every check and prints a report. It doesn't stop at the first problem,
+and only fails the job if a section **FAILED**; **WARN** means degraded but serving (for example a
+node in maintenance). It only reads, plus harmless test writes (a TVT login, a cart that is emptied
+again, a marker on the `tvtcheck` LDAP entry); stock is never touched.
+
+| Section (switch) | Checks |
+| --- | --- |
+| HAProxy (`tvt_haproxy`) | service running, shop address present, every backend has a healthy server, nothing DOWN (MAINT = WARN) |
+| Shop (`tvt_shop`) | pages, products, sign-up, login, cart, logout and admin login through HAProxy |
+| Nodes (`tvt_nodes`) | all 8 health endpoints on each frontend directly (failures on a node in MAINT = WARN) |
+| Database (`tvt_database`) | Galera Primary/Synced, cluster size incl. garbd, real writes and where they landed, table checksums equal |
+| LDAP (`tvt_ldap`) | binds and user counts, direct logins on each in-service node, replication both ways |
+| Monitoring (`tvt_monitoring`) | exporter sees HAProxy/DB/LDAP, Prometheus scraping, Grafana up with the dashboard |
+| Time (`tvt_time`) | NTP synchronised and chrony offset under 1s on all three hosts (WARN only) |
+
+```bash
+ansible-playbook playbooks/tvt.yml -e lab_password='...'
+ansible-playbook playbooks/tvt.yml -e lab_password='...' -e tvt_ldap=false     # skip a section
+ansible-playbook playbooks/tvt.yml -e lab_password='...' -e tvt_require_all_online=true
+```
+
+By default a node in maintenance (MAINT/DRAIN, a stopped DB or LDAP) is a WARN, so the TVT still
+passes while you work on one node. Add `-e tvt_require_all_online=true` when everything should be
+back in service (scheduled checks, the last node of a maintenance workflow): every WARN becomes a
+FAIL, except Time. In AAP, add it as a survey/extra var on the TVT job template.
+
+Example report:
+
+```
+TVT PASSED WITH WARNINGS (7 sections)
+WARN  HAProxy     7 backends healthy; in maintenance: web-frontend1
+PASS  Shop        pages, 3 products, sign-up/login/cart/logout and admin login via http://10.10.4.30
+PASS  Nodes       all 16 health checks OK
+WARN  Database    Galera size 2, Synced: web-frontend2; writes web-frontend2=4; checksums match
+WARN  LDAP        up: web-frontend2 (104 users); only one directory up, replication not tested
+PASS  Monitoring  exporter sees HAProxy/DB/LDAP, Prometheus scraping, Grafana up with Webstore - Overview
+PASS  Time        all hosts NTP-synchronised, offsets: web-frontend1=0.000021s, ...
+```
+
+In AAP, give it its own job template (inventory from the project, Machine + Webstore Lab Password
+credentials, no survey needed) and add a **Schedule**, e.g. hourly, with a failure notification.
+
+## Database maintenance on one node
+
+`playbooks/maintenance-db.yml` takes one frontend's MariaDB out of service and back, with a check
+after every step. Choose steps with true/false switches; they always run in this order:
+
+| Switch | What it does | Refuses when |
+| --- | --- | --- |
+| `switch_primary` | Drains the target in HAProxy (then MAINT) and makes its DB read-only, so all writes go to the other node. TVT pushes real writes through the shop and checks they landed on the peer and **none** on the target. | the peer isn't Primary + Synced and UP in HAProxy |
+| `shutdown_db_service` | Stops the target's backend and MariaDB (clean Galera leave); checks the peer still has quorum; prints the saved `seqno`. | the target is still in HAProxy, or the peer isn't healthy |
+| `start_db_service` | Clears stale SST files, starts MariaDB, waits until Synced (IST/SST), starts backend/APIs/httpd and health-checks them. | the peer isn't Primary |
+| `restore_traffic` | Makes the target writable and puts it back into HAProxy; waits until UP everywhere. | the target isn't Synced |
+| `database_tvt` | Shop pages, admin login, real writes, Galera state on every running node, cluster size (incl. garbd), data checksums across nodes. | n/a (fails on any problem) |
 
 ```bash
 cd ansible
-ansible-playbook playbooks/smoke.yml
+# take web-frontend1's database down
+ansible-playbook playbooks/maintenance-db.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io \
+  -e switch_primary=true -e shutdown_db_service=true -e database_tvt=true
+
+# ...maintenance...
+
+# bring it back into service
+ansible-playbook playbooks/maintenance-db.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io \
+  -e start_db_service=true -e restore_traffic=true -e database_tvt=true
 ```
 
-You should be able to register, log in, add the three catalog items to a cart, and check out. The ops page should move as synth users (or you) log in and out.
+Galera has no fixed primary: both nodes accept writes, and each frontend writes to its own MariaDB.
+"Primary" here means the only node receiving traffic; the TVT proves it from the write counters.
+The TVT uses a `tvtcheck` shop account (created on first run, password = lab_password).
+
+## Take one node out of HAProxy
+
+`playbooks/maintenance-haproxy.yml` only touches HAProxy on demo-vm; the node's containers and
+database keep running.
+
+| Switch | What it does | Refuses when |
+| --- | --- | --- |
+| `remove_haproxy` | DRAIN the node in every backend, wait for its open connections to finish (`drain_timeout`, default 60s), then MAINT; checks the shop still answers. | the other node isn't UP everywhere, or connections are still open after the timeout (add `-e force_remove=true` to cut them) |
+| `restore_haproxy` | Checks the node's own services are healthy, sets it READY and waits until HAProxy marks it UP in every backend. | any of its health checks fail |
+
+```bash
+ansible-playbook playbooks/maintenance-haproxy.yml -e target=web-frontend1.lab.rippa.io -e remove_haproxy=true
+ansible-playbook playbooks/maintenance-haproxy.yml -e target=web-frontend1.lab.rippa.io -e restore_haproxy=true
+```
+
+## LDAP maintenance on one node
+
+`playbooks/maintenance-ldap.yml` stops and starts 389-ds on one frontend. Each node's login and
+account APIs fall back to the other node's LDAP (`LDAP_PEER_URL`), so the shop keeps working.
+
+| Switch | What it does | Refuses when |
+| --- | --- | --- |
+| `ldap_stop` | Stops `dirsrv@webstore` on the target, then logs in directly on the target's own login API and through HAProxy to prove the fallback. | the other node's LDAP isn't healthy; the target's running APIs have no `LDAP_PEER_URL` to the other node; user counts differ (override with `force_stop=true`) |
+| `ldap_start` | Starts it, checks the service account binds, then writes a change on each node and waits for it on the other (replication both ways) and compares user counts. | n/a (fails if replication doesn't catch up) |
+| `ldap_tvt` | Binds and user counts on every running directory, direct logins on both nodes, a login via HAProxy, two-way replication when both are up. | n/a |
+
+```bash
+ansible-playbook playbooks/maintenance-ldap.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io -e ldap_stop=true
+ansible-playbook playbooks/maintenance-ldap.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io -e ldap_start=true -e ldap_tvt=true
+```
+
+Changes made while one directory is down queue on the other and replay when it starts; keep
+outages well under the changelog retention (about 7 days by default).
+
+## Patch RHEL and reboot
+
+`playbooks/patch-rhel.yml` installs updates on one host and reboots it if needed, one host per
+run (`target`). Updates go on while the node is still serving; only the reboot moves traffic.
+
+```bash
+ansible-playbook playbooks/patch-rhel.yml -e lab_password='...' -e target=web-frontend1.lab.rippa.io
+ansible-playbook playbooks/patch-rhel.yml -e lab_password='...' -e target=web-frontend2.lab.rippa.io
+ansible-playbook playbooks/patch-rhel.yml -e lab_password='...' -e target=demo-vm.lab.rippa.io -e allow_shop_outage=true
+ansible-playbook playbooks/tvt.yml        -e lab_password='...' -e tvt_require_all_online=true
+```
+
+| Option | Values |
+| --- | --- |
+| `patch_scope` | `kernel` (default, kernel packages only), `security` (all security errata), `all` |
+| `patch_reboot` | `needed` (default: a new kernel, or `dnf needs-restarting -r` says so), `always`, `never` |
+| `drain_timeout`, `force_remove` | as in the HAProxy playbook |
+| `allow_shop_outage` | required to reboot demo-vm |
+
+- **web-frontend1/2:** refuses to reboot unless the other node is UP in HAProxy, Synced in a
+  3-member Galera cluster and its LDAP works. It drains the node to MAINT, stops MariaDB cleanly,
+  reboots, checks the new kernel is running, waits for MariaDB to resync, the apps and LDAP to pass
+  health checks, then puts the node back in HAProxy. A node that was already in MAINT before you
+  started stays in MAINT.
+- **demo-vm:** HAProxy runs there, so the shop is offline for the 1-3 minutes it takes to reboot,
+  which is why it needs `allow_shop_outage=true`. Both frontends must be Synced first, so Galera
+  keeps quorum without garbd. Run it from AAP or another machine, never from demo-vm itself.
+- If a step fails, nothing is rebooted after it, and the job publishes `maint_patch.patch_rhel` with
+  `result: FAIL` and the reason. A successful run records the updates, the kernel before and after,
+  and whether it rebooted.
+
+## AAP workflow: frontend maintenance
+
+The maintenance playbooks and `tvt.yml` publish their results with `set_stats`, so an AAP workflow
+passes them from node to node (and to notifications) as extra vars:
+
+| Artifact | Contents |
+| --- | --- |
+| `maint_haproxy`, `maint_db`, `maint_ldap`, `maint_patch` | one record per action, e.g. `maint_db.switch_primary` = `{result, node, tvt: {...}, error, finished_at, job_id}` |
+| `maint_last` | the most recent step's record (handy for notification templates) |
+| `maint_history` | every step in the workflow so far, in order (each job appends) |
+| `maint_target` | the node being worked on |
+| `tvt_report` | `{overall, sections, failed, warnings}` from `tvt.yml` |
+
+A failed step still publishes its record (`result: FAIL` and the reason) before the job fails, so
+the workflow's failure branch knows exactly what went wrong. Artifact names never match a playbook
+switch, so a downstream node can't accidentally inherit `ldap_stop: true` and act on it.
+
+Suggested layout (one job template per action with that action's switch fixed in its extra vars;
+the workflow survey asks for `target` once and every node inherits it):
+
+```
+TVT (pre-check)
+  └─ HAProxy: remove_haproxy
+       └─ DB: switch_primary + shutdown_db_service
+            └─ LDAP: ldap_stop
+                 └─ Approval: "maintenance finished?"
+                      └─ LDAP: ldap_start + ldap_tvt
+                           └─ DB: start_db_service + restore_traffic + database_tvt
+                                └─ HAProxy: restore_haproxy
+                                     └─ TVT (post-check)
+on failure of any node ──> notification (use maint_last / maint_history)
+```
 
 ## Drain one shop host
 
-Bleed connections off web-frontend1, then stop it; web-frontend2 keeps serving:
+Bleed connections off a node in HAProxy, then stop its services; the other node and garbd keep
+quorum:
 
 ```bash
-cd ansible
-ansible-playbook playbooks/drain.yml -e target=web-frontend1.lab.rippa.io
+ansible-playbook playbooks/drain.yml   -e target=web-frontend1.lab.rippa.io
+ansible-playbook playbooks/restore.yml -e target=web-frontend1.lab.rippa.io -e lab_password='...'
 ```
-
-Bring it back:
-
-```bash
-ansible-playbook playbooks/restore.yml -e target=web-frontend1.lab.rippa.io
-```
-
-There are no operator `webstore-drain.sh` scripts; use these playbooks.
 
 ## Layout
 
@@ -189,8 +307,11 @@ There are no operator `webstore-drain.sh` scripts; use these playbooks.
 | `frontend/` | Shop HTML/JS (httpd) |
 | `api-account/` `api-login/` `api-logout/` `api-cart/` | Public APIs |
 | `api-stats/` | Ops graph data (not on the shop VIP) |
+| `api-admin/` | Catalog management (`/api/admin`, admins only) |
+| `monitoring/` | Exporter, Prometheus and Grafana for demo-vm |
+| `tools/` | `create_accounts.py` (user1..user100) and `load_test.py` (simulated shoppers) |
 | `backend/` | SQL, sessions, cart |
-| `dashboard/` | Logged-in graph (demo-vm) |
+| `dashboard/` | Old logged-in graph (superseded by `monitoring/`) |
 | `synth-users/` | 100 lab logins against the VIP |
-| `ansible/playbooks/` | deploy, Galera, drain, restore, smoke |
-| `deploy/` | Quadlets, HAProxy, keepalived, LDAP, env example |
+| `ansible/` | `site.yml` (full build), `tvt.yml`, maintenance-db/haproxy/ldap, `patch-rhel.yml`, smoke, drain, restore; roles per component; settings in `group_vars/all/main.yml` |
+| `deploy/` | Quadlets, LDAP helper scripts, env example (keepalived/shop-HAProxy files are legacy, unused) |

@@ -1,79 +1,55 @@
 ---
-- name: Drain a shop host
-  hosts: webstore_shop
+# Take one shop node out cleanly:  ansible-playbook playbooks/drain.yml -e target=web-frontend1.lab.rippa.io
+- name: Drain the target in HAProxy (demo-vm)
+  hosts: webstore_ops
   become: true
-  gather_facts: true
+  gather_facts: false
   vars:
-    haproxy_server: "{{ target }}"
+    haproxy_server: "{{ hostvars[target].node_name }}"
   pre_tasks:
-    - name: Require target extra-var
+    - name: Check the inventory loaded the lab settings
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: check_inventory
+
+    - name: Require target
       ansible.builtin.assert:
         that:
           - target is defined
           - target in groups['webstore_shop']
         fail_msg: "Pass -e target=web-frontend1.lab.rippa.io"
-
-- name: Move VIP off the target if it owns it
-  hosts: "{{ target }}"
-  become: true
-  gather_facts: true
   tasks:
-    - name: Check whether this host holds the shop VIP
-      ansible.builtin.command: ip -4 addr show
-      register: addr
-      changed_when: false
-    - name: Stop keepalived so the VIP fails over
-      ansible.builtin.systemd:
-        name: keepalived
-        state: stopped
-      when: shop_vip_ip in addr.stdout
-
-- name: Bleed the target out of both HAProxy instances
-  hosts: webstore_shop
-  become: true
-  gather_facts: false
-  vars:
-    haproxy_server: "{{ target }}"
-    haproxy_state: drain
-  tasks:
-    - ansible.builtin.include_role:
+    - name: Drain
+      ansible.builtin.include_role:
         name: haproxy_state
-    - name: Wait until HAProxy shows zero current connections to the target
+      vars:
+        haproxy_state: drain
+    - name: Wait for its connections to finish
       ansible.builtin.shell: |
-        echo "show stat" | socat stdio {{ haproxy_socket }} \
-          | awk -F, -v n="{{ target }}" 'NR > 1 && $2 == n { c += $5 } END { print c + 0 }'
+        echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+          | awk -F, -v n="{{ haproxy_server }}" 'NR > 1 && $2 == n { c += $5 } END { print c + 0 }'
       register: scur
       until: scur.stdout | int == 0
       retries: 30
       delay: 2
       changed_when: false
-    - name: Place target servers in maint
+    - name: Maintenance mode
       ansible.builtin.include_role:
         name: haproxy_state
       vars:
         haproxy_state: maint
 
-- name: Stop shop units on the target
+- name: Stop the target's services
   hosts: "{{ target }}"
   become: true
   gather_facts: false
   tasks:
-    - name: Stop API, backend, httpd, haproxy
+    - name: Stop APIs, httpd, backend
       ansible.builtin.systemd:
         name: "{{ item }}"
         state: stopped
-      loop: "{{ shop_api_units + shop_app_units }}"
-    - name: Desync Galera
-      ansible.builtin.shell: |
-        set -a
-        . /etc/webstore/webstore.env
-        set +a
-        podman exec webstore-mariadb mysql -u root -p"$MARIADB_ROOT_PASSWORD" \
-          -e "SET GLOBAL wsrep_desync=ON"
-      args:
-        executable: /bin/bash
-      failed_when: false
-    - name: Stop MariaDB
+      loop: "{{ shop_api_units + ['webstore-httpd.service', 'webstore-backend.service'] }}"
+    - name: Stop MariaDB (the other node + garbd keep quorum)
       ansible.builtin.systemd:
         name: webstore-mariadb.service
         state: stopped

@@ -1,0 +1,115 @@
+---
+# Technical verification test: is the shop working and is the database healthy?
+# Runs on demo-vm. Works whether one or both DB nodes are up.
+
+- name: Galera status of both nodes
+  ansible.builtin.include_tasks: galera_status.yml
+  loop: "{{ groups['webstore_shop'] }}"
+  loop_control: { loop_var: node }
+
+- name: HAProxy state of both nodes
+  ansible.builtin.include_tasks: haproxy_status.yml
+  loop: "{{ groups['webstore_shop'] | map('extract', hostvars, 'node_name') | list }}"
+  loop_control: { loop_var: server }
+
+- name: Which nodes are up / in service
+  ansible.builtin.set_fact:
+    db_nodes_up: >-
+      {% set l = [] %}{% for h in groups['webstore_shop'] %}{% if gs[h].up %}{% set _ = l.append(h) %}{% endif %}{% endfor %}{{ l }}
+    nodes_in_service: >-
+      {% set l = [] %}{% for h in groups['webstore_shop'] %}{% if (hp[hostvars[h].node_name].web_pool | default('')) is match('UP') %}{% set _ = l.append(h) %}{% endif %}{% endfor %}{{ l }}
+
+- name: "TVT: at least one database node is up"
+  ansible.builtin.assert:
+    that: db_nodes_up | length > 0
+    fail_msg: No MariaDB node is reachable.
+
+- name: "TVT: every running DB node is Primary, Synced and ready"
+  ansible.builtin.assert:
+    that:
+      - gs[item].wsrep_cluster_status == 'Primary'
+      - gs[item].wsrep_local_state_comment == 'Synced'
+      - gs[item].wsrep_ready == 'ON'
+    fail_msg: "{{ item }}: {{ gs[item] }}"
+    quiet: true
+  loop: "{{ db_nodes_up }}"
+
+- name: "TVT: cluster size = running DB nodes + garbd"
+  ansible.builtin.assert:
+    that: (gs[item].wsrep_cluster_size | int) == (db_nodes_up | length) + 1
+    fail_msg: >-
+      {{ item }} sees {{ gs[item].wsrep_cluster_size }} members, expected {{ (db_nodes_up | length) + 1 }}
+      ({{ db_nodes_up | length }} DB node(s) + garbd). Is webstore-garbd running on {{ ops_name }}?
+    quiet: true
+  loop: "{{ db_nodes_up }}"
+
+- name: "TVT: at least one node is serving traffic in HAProxy"
+  ansible.builtin.assert:
+    that: nodes_in_service | length > 0
+    fail_msg: "No shop node is UP in HAProxy: {{ hp }}"
+
+- name: "TVT: every API backend has an UP server"
+  ansible.builtin.shell: |
+    echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+      | awk -F, 'NR>1 && $2=="BACKEND" && $1!="stats" && $18!="UP" {print $1" "$18}'
+  register: _be_down
+  until: _be_down.stdout == ''
+  retries: 5
+  delay: 3
+  changed_when: false
+
+- name: "TVT: real writes through the shop"
+  ansible.builtin.include_tasks: write_probe.yml
+
+- name: "TVT: writes were accepted, and none landed on a node that is out of service"
+  ansible.builtin.assert:
+    that:
+      - probe_delta.values() | sum > 0
+      - (db_nodes_up | difference(nodes_in_service) | map('extract', probe_delta) | sum) == 0
+    fail_msg: "Write-sets per node during the probe: {{ probe_delta }} (in service: {{ nodes_in_service }})"
+
+- name: "TVT: data is identical on every running node"
+  ansible.builtin.include_tasks: checksums.yml
+  when: db_nodes_up | length > 1
+
+- name: Only one DB node running - nothing to compare
+  ansible.builtin.set_fact:
+    db_check: single
+    db_check_note: only one DB node running, nothing to compare
+    db_checksums: {}
+  when: db_nodes_up | length < 2
+
+- name: "TVT: data comparison"
+  ansible.builtin.assert:
+    that: db_check != 'diverged'
+    fail_msg: "{{ db_check_note }}"
+    success_msg: "{{ db_check_note }}"
+
+- name: "TVT: admin can sign in and is recognised"
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/login"
+    method: POST
+    body_format: json
+    body: { username: "{{ admin_users[0] }}", password: "{{ lab_password }}" }
+  register: _admin
+  no_log: true
+
+- name: "TVT: /api/admin/me"
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/admin/me"
+    headers: { Authorization: "Bearer {{ _admin.json.token }}" }
+
+- name: Admin logout
+  ansible.builtin.uri:
+    url: "{{ tvt_base }}/api/logout"
+    method: POST
+    headers: { Authorization: "Bearer {{ _admin.json.token }}" }
+
+- name: TVT result
+  ansible.builtin.debug:
+    msg:
+      - "PASS - shop and database healthy"
+      - "DB nodes up:        {{ db_nodes_up | map('extract', hostvars, 'node_name') | join(', ') }}"
+      - "Serving traffic:    {{ nodes_in_service | map('extract', hostvars, 'node_name') | join(', ') }}"
+      - "Writes during test: {% for n, d in probe_delta.items() %}{{ hostvars[n].node_name }}={{ d }} {% endfor %}"
+      - "Cluster size:       {{ gs[db_nodes_up[0]].wsrep_cluster_size }}"

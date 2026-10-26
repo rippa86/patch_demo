@@ -1,0 +1,38 @@
+---
+- name: Clear stale SST state
+  ansible.builtin.include_tasks: clear_stale_sst.yml
+
+- name: Mark this node safe to bootstrap (forced recovery only)
+  ansible.builtin.shell: |
+    mp=$(podman volume inspect webstore-mariadb-data --format '{{ '{{' }}.Mountpoint{{ '}}' }}')
+    sed -i 's/^safe_to_bootstrap: 0/safe_to_bootstrap: 1/' "$mp/grastate.dat"
+  when: galera_force_bootstrap is defined and galera_has_data
+
+- name: galera.cnf with an empty gcomm:// (new cluster)
+  ansible.builtin.template:
+    src: galera.cnf.j2
+    dest: /etc/webstore/galera.cnf
+    mode: "0644"
+  vars:
+    galera_bootstrap_now: true
+  no_log: true
+
+- name: Start the first node
+  ansible.builtin.systemd:
+    name: webstore-mariadb.service
+    state: started
+
+- name: Wait for the new cluster
+  ansible.builtin.include_tasks: wait_synced.yml
+
+- name: Put the full cluster address back (no restart needed now)
+  ansible.builtin.template:
+    src: galera.cnf.j2
+    dest: /etc/webstore/galera.cnf
+    mode: "0644"
+  no_log: true
+
+- name: This node is now Primary
+  ansible.builtin.set_fact:
+    galera_is_primary: true
+    galera_needs_restart: false

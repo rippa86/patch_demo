@@ -1,0 +1,208 @@
+---
+# Technical verification test for the whole lab. Safe to run any time (also on an
+# AAP schedule): it only reads, plus a few harmless test writes (a TVT login, a
+# cart that is emptied again, a marker on the tvtcheck LDAP entry). No stock changes.
+#
+# Every section runs even if an earlier one fails; the job prints a report and
+# fails only if a section FAILED. WARN = degraded but serving (e.g. a node is in
+# maintenance).
+#
+#   ansible-playbook playbooks/tvt.yml -e lab_password=...
+#   ansible-playbook playbooks/tvt.yml -e lab_password=... -e tvt_ldap=false -e tvt_time=false
+#
+# Sections (all true by default): tvt_haproxy tvt_shop tvt_nodes tvt_database tvt_ldap tvt_monitoring tvt_time
+#
+# -e tvt_require_all_online=true  strict mode: anything not fully online (a node in HAProxy
+#                                 maintenance, one DB node or directory down) is a FAIL, not a WARN.
+#                                 Use it for scheduled checks and the end of a maintenance workflow.
+
+- name: Webstore TVT
+  hosts: webstore_ops
+  become: true
+  gather_facts: false
+  vars:
+    tvt_base: "http://{{ shop_vip_ip }}"
+    tvt_user: tvtcheck
+    tvt_results: []
+
+  pre_tasks:
+    - name: Check the inventory loaded the lab settings
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: check_inventory
+
+    - name: lab_password is needed
+      ansible.builtin.assert:
+        that: lab_password is defined
+        fail_msg: Pass -e lab_password=... (or attach the Webstore Lab Password credential in AAP)
+
+  tasks:
+    - name: "HAProxy"
+      when: tvt_haproxy | default(true) | bool
+      block:
+        - name: "HAProxy checks"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: haproxy
+      rescue:
+        - name: "HAProxy failed"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: record
+          vars:
+            r_check: "HAProxy"
+            r_status: FAIL
+            r_detail: "{{ ansible_failed_task.name | default('?') }}: {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | map(attribute='msg') | first) if (ansible_failed_result.msg | default('')) is search('One or more items failed') else ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')) }}"
+
+    - name: "Shop"
+      when: tvt_shop | default(true) | bool
+      block:
+        - name: "Shop checks"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: shop
+      rescue:
+        - name: "Shop failed"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: record
+          vars:
+            r_check: "Shop"
+            r_status: FAIL
+            r_detail: "{{ ansible_failed_task.name | default('?') }}: {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | map(attribute='msg') | first) if (ansible_failed_result.msg | default('')) is search('One or more items failed') else ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')) }}"
+
+    - name: "Nodes"
+      when: tvt_nodes | default(true) | bool
+      block:
+        - name: "Nodes checks"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: nodes
+      rescue:
+        - name: "Nodes failed"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: record
+          vars:
+            r_check: "Nodes"
+            r_status: FAIL
+            r_detail: "{{ ansible_failed_task.name | default('?') }}: {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | map(attribute='msg') | first) if (ansible_failed_result.msg | default('')) is search('One or more items failed') else ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')) }}"
+
+    - name: "Database"
+      when: tvt_database | default(true) | bool
+      block:
+        - name: "Database checks"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: database
+      rescue:
+        - name: "Database failed"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: record
+          vars:
+            r_check: "Database"
+            r_status: FAIL
+            r_detail: "{{ ansible_failed_task.name | default('?') }}: {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | map(attribute='msg') | first) if (ansible_failed_result.msg | default('')) is search('One or more items failed') else ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')) }}"
+
+    - name: "LDAP"
+      when: tvt_ldap | default(true) | bool
+      block:
+        - name: "LDAP checks"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: ldap
+      rescue:
+        - name: "LDAP failed"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: record
+          vars:
+            r_check: "LDAP"
+            r_status: FAIL
+            r_detail: "{{ ansible_failed_task.name | default('?') }}: {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | map(attribute='msg') | first) if (ansible_failed_result.msg | default('')) is search('One or more items failed') else ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')) }}"
+
+    - name: "Monitoring"
+      when: tvt_monitoring | default(true) | bool
+      block:
+        - name: "Monitoring checks"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: monitoring
+      rescue:
+        - name: "Monitoring failed"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: record
+          vars:
+            r_check: "Monitoring"
+            r_status: FAIL
+            r_detail: "{{ ansible_failed_task.name | default('?') }}: {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | map(attribute='msg') | first) if (ansible_failed_result.msg | default('')) is search('One or more items failed') else ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')) }}"
+
+    - name: "Time"
+      when: tvt_time | default(true) | bool
+      block:
+        - name: "Time checks"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: time
+      rescue:
+        - name: "Time failed"
+          ansible.builtin.include_role:
+            name: tvt
+            tasks_from: record
+          vars:
+            r_check: "Time"
+            r_status: FAIL
+            r_detail: "{{ ansible_failed_task.name | default('?') }}: {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | map(attribute='msg') | first) if (ansible_failed_result.msg | default('')) is search('One or more items failed') else ansible_failed_result.msg | default(ansible_failed_result.stderr | default('failed')) }}"
+
+    - name: Strict mode - a WARN means something is not online, so treat it as a FAIL
+      when: tvt_require_all_online | default(false) | bool
+      ansible.builtin.set_fact:
+        tvt_results: >-
+          {% set l = [] %}{% for r in tvt_results %}{% if r.status == 'WARN' and r.check != 'Time' %}{% set _ = l.append(r | combine({'status': 'FAIL', 'detail': '(require all online) ' ~ r.detail})) %}{% else %}{% set _ = l.append(r) %}{% endif %}{% endfor %}{{ l }}
+
+    - name: Build the report
+      ansible.builtin.set_fact:
+        tvt_overall: >-
+          {{ 'FAILED' if tvt_results | selectattr('status', 'equalto', 'FAIL') | list
+             else 'PASSED WITH WARNINGS' if tvt_results | selectattr('status', 'equalto', 'WARN') | list
+             else 'PASSED' }}
+        tvt_lines: >-
+          {% set l = [] %}{% for r in tvt_results %}{% set _ = l.append('%-4s  %-10s  %s' | format(r.status, r.check, r.detail)) %}{% endfor %}{{ l }}
+
+    - name: TVT report
+      ansible.builtin.debug:
+        msg: "{{ ['TVT ' ~ tvt_overall ~ ' (' ~ tvt_results | length ~ ' sections)'] + tvt_lines }}"
+
+    - name: Publish the TVT report for AAP workflows (set_stats)
+      ansible.builtin.set_stats:
+        data:
+          tvt_report:
+            overall: "{{ tvt_overall }}"
+            strict: "{{ tvt_require_all_online | default(false) | bool }}"
+            sections: "{{ tvt_results }}"
+            failed: "{{ tvt_results | selectattr('status', 'equalto', 'FAIL') | map(attribute='check') | list }}"
+            warnings: "{{ tvt_results | selectattr('status', 'equalto', 'WARN') | map(attribute='check') | list }}"
+            finished_at: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+            job_id: "{{ awx_job_id | default(tower_job_id | default('')) }}"
+          maint_last:
+            playbook: tvt
+            action: tvt
+            result: "{{ tvt_overall }}"
+            tvt: "{{ dict(tvt_results | map(attribute='check') | zip(tvt_results | map(attribute='status'))) }}"
+            finished_at: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+            job_id: "{{ awx_job_id | default(tower_job_id | default('')) }}"
+          maint_history: >-
+            {{ maint_history | default([]) + [{'playbook': 'tvt', 'action': 'tvt', 'result': tvt_overall,
+                 'tvt': dict(tvt_results | map(attribute='check') | zip(tvt_results | map(attribute='status'))),
+                 'finished_at': now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                 'job_id': awx_job_id | default(tower_job_id | default(''))}] }}
+        per_host: false
+        aggregate: false
+
+    - name: Overall result
+      ansible.builtin.assert:
+        that: tvt_results | selectattr('status', 'equalto', 'FAIL') | list | length == 0
+        fail_msg: "Failed: {{ tvt_results | selectattr('status', 'equalto', 'FAIL') | map(attribute='check') | join(', ') }} (see the report above)"
+        success_msg: "No failures"

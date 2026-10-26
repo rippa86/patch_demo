@@ -78,6 +78,8 @@ class SessionRow(Base):
     issued_at: Mapped[datetime] = mapped_column(DateTime)
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Shop host whose backend created the session (e.g. "web-frontend1").
+    node: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class SessionSample(Base):
@@ -86,3 +88,26 @@ class SessionSample(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     t: Mapped[datetime] = mapped_column(DateTime, index=True)
     n: Mapped[int] = mapped_column(Integer)
+
+
+class Admin(Base):
+    """Users allowed to manage the catalog. Passwords stay in LDAP."""
+
+    __tablename__ = "admins"
+
+    uid: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class InventoryLog(Base):
+    """Audit trail for admin catalog changes (create / restock)."""
+
+    __tablename__ = "inventory_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    uid: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16))
+    delta: Mapped[int] = mapped_column(Integer)
+    stock_after: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

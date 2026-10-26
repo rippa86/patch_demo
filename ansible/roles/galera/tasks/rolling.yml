@@ -1,0 +1,17 @@
+---
+# Used by a serial: 1 play, so only one node restarts at a time.
+- name: Restart MariaDB to apply galera.cnf
+  ansible.builtin.systemd:
+    name: webstore-mariadb.service
+    state: restarted
+  when: galera_needs_restart | default(false) | bool
+
+- name: Wait until it is back in sync
+  ansible.builtin.include_tasks: wait_synced.yml
+  when: galera_needs_restart | default(false) | bool
+
+- name: Backend restarts with MariaDB (Requires=); make sure it is up
+  ansible.builtin.systemd:
+    name: webstore-backend.service
+    state: started
+  when: galera_needs_restart | default(false) | bool

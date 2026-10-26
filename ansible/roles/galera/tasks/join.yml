@@ -1,0 +1,16 @@
+---
+- name: Clear stale SST state
+  ansible.builtin.include_tasks: clear_stale_sst.yml
+
+- name: Start MariaDB (joins via IST, or SST from a donor)
+  ansible.builtin.systemd:
+    name: webstore-mariadb.service
+    state: started
+
+- name: Wait for the join to finish
+  ansible.builtin.include_tasks: wait_synced.yml
+
+- name: This node is now Primary
+  ansible.builtin.set_fact:
+    galera_is_primary: true
+    galera_needs_restart: false

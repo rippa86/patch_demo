@@ -1,0 +1,12 @@
+---
+- name: Wait until this node is Primary and Synced
+  ansible.builtin.shell: |
+    podman exec webstore-mariadb mariadb -uroot -p"$DB_PW" -Nse \
+      "SHOW STATUS WHERE Variable_name IN ('wsrep_cluster_status','wsrep_local_state_comment')" 2>/dev/null
+  environment:
+    DB_PW: "{{ lab_password }}"
+  register: galera_wait
+  until: "'Primary' in galera_wait.stdout and 'Synced' in galera_wait.stdout"
+  retries: "{{ galera_wait_retries | default(120) }}"
+  delay: 5
+  changed_when: false

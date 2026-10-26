@@ -25,13 +25,18 @@ async function loadProducts() {
   products.forEach((product) => {
     const row = document.createElement("div");
     row.className = "product";
-    row.innerHTML = `
-      <div>
-        <strong>${product.name}</strong>
-        <div class="msg">${product.description}</div>
-        <div class="price">${money(product.price_cents)} · ${product.stock} in stock</div>
-      </div>
-    `;
+    // Built with textContent: product names now come from the admin form.
+    const info = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = product.name;
+    const desc = document.createElement("div");
+    desc.className = "msg";
+    desc.textContent = product.description;
+    const price = document.createElement("div");
+    price.className = "price";
+    price.textContent = `${money(product.price_cents)} · ${product.stock} in stock`;
+    info.append(name, desc, price);
+    row.appendChild(info);
     const btn = document.createElement("button");
     btn.textContent = "Add";
     btn.disabled = !Auth.token();
@@ -66,7 +71,11 @@ async function loadCart() {
   cart.items.forEach((item) => {
     const row = document.createElement("div");
     row.className = "cart-item";
-    row.innerHTML = `<span>${item.name} × ${item.qty}</span><span>${money(item.price_cents * item.qty)}</span>`;
+    const label = document.createElement("span");
+    label.textContent = `${item.name} × ${item.qty}`;
+    const total = document.createElement("span");
+    total.textContent = money(item.price_cents * item.qty);
+    row.append(label, total);
     root.appendChild(row);
   });
 }

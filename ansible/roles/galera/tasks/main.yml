@@ -1,0 +1,65 @@
+---
+# Bring the Galera cluster up safely:
+#   * cluster already Primary somewhere -> stopped nodes just join (IST/SST)
+#   * no node running and no data       -> bootstrap a NEW cluster on frontend1
+#   * no node running but data exists   -> stop and ask (choosing the wrong node loses writes);
+#                                          rerun with -e galera_force_bootstrap=<host>
+
+- name: galera.cnf (full cluster address)
+  ansible.builtin.template:
+    src: galera.cnf.j2
+    dest: /etc/webstore/galera.cnf
+    mode: "0644"
+  register: galera_cnf
+  no_log: true
+
+- name: Is MariaDB running and in the Primary component?
+  ansible.builtin.shell: |
+    podman exec webstore-mariadb mariadb -uroot -p"$DB_PW" -Nse \
+      "SHOW STATUS LIKE 'wsrep_cluster_status'" 2>/dev/null | awk '{print $2}'
+  environment:
+    DB_PW: "{{ lab_password }}"
+  register: galera_status
+  changed_when: false
+  failed_when: false
+
+- name: Does this node already have Galera data?
+  ansible.builtin.shell: |
+    mp=$(podman volume inspect webstore-mariadb-data --format '{{ '{{' }}.Mountpoint{{ '}}' }}' 2>/dev/null) || { echo none; exit 0; }
+    if [ -f "$mp/grastate.dat" ]; then
+      echo "seqno=$(awk '/^seqno:/{print $2}' "$mp/grastate.dat") safe=$(awk '/^safe_to_bootstrap:/{print $2}' "$mp/grastate.dat")"
+    else
+      echo none
+    fi
+  register: galera_data
+  changed_when: false
+
+- name: Record state
+  ansible.builtin.set_fact:
+    galera_is_primary: "{{ galera_status.stdout | trim == 'Primary' }}"
+    galera_has_data: "{{ galera_data.stdout != 'none' }}"
+    galera_needs_restart: "{{ galera_cnf is changed and galera_status.stdout | trim == 'Primary' }}"
+
+- name: Cluster-wide view
+  ansible.builtin.set_fact:
+    galera_any_primary: "{{ groups['webstore_shop'] | map('extract', hostvars, 'galera_is_primary') | select | list | length > 0 }}"
+    galera_any_data: "{{ groups['webstore_shop'] | map('extract', hostvars, 'galera_has_data') | select | list | length > 0 }}"
+    galera_bootstrap_host: "{{ galera_force_bootstrap | default(frontend1_fqdn) }}"
+
+- name: Stop if the whole cluster is down with data on disk
+  ansible.builtin.fail:
+    msg: |
+      No Galera node is running, but data exists. Bootstrapping the wrong node loses writes.
+      Per-node state: {% for h in groups['webstore_shop'] %}{{ h }}: {{ hostvars[h].galera_data.stdout }}; {% endfor %}
+      Pick the node with the HIGHEST seqno (or safe_to_bootstrap: 1), then re-run with
+        -e galera_force_bootstrap=<that host>
+  when: not galera_any_primary and galera_any_data and galera_force_bootstrap is not defined
+  run_once: true
+
+- name: Bootstrap a new cluster
+  ansible.builtin.include_tasks: bootstrap.yml
+  when: not galera_any_primary and inventory_hostname == galera_bootstrap_host
+
+- name: Join the cluster
+  ansible.builtin.include_tasks: join.yml
+  when: not galera_is_primary and inventory_hostname != (galera_bootstrap_host if not galera_any_primary else '')

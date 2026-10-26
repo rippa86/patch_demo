@@ -1,0 +1,19 @@
+[Unit]
+Description=webstore Grafana
+After=network-online.target webstore-prometheus.service
+
+[Container]
+Image=docker.io/grafana/grafana-oss:11.6.0
+ContainerName=webstore-grafana
+Network=host
+EnvironmentFile=/etc/webstore/grafana.env
+Volume=webstore-grafana-data:/var/lib/grafana
+Volume=/etc/webstore/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro,Z
+Volume=/etc/webstore/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro,Z
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

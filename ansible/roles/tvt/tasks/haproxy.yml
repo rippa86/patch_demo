@@ -1,0 +1,40 @@
+---
+- name: HAProxy service is running
+  ansible.builtin.command: systemctl is-active haproxy
+  changed_when: false
+
+- name: Shop address {{ shop_vip_ip }} is on {{ ops_name }}
+  ansible.builtin.shell: ip -4 -o addr show | grep -q ' {{ shop_vip_ip.split(':')[0] }}/'
+  changed_when: false
+
+- name: Server states
+  ansible.builtin.shell: |
+    echo "show stat" | socat stdio unix-connect:{{ haproxy_socket }} \
+      | awk -F, 'NR>1 && NF>1 && $1!="stats" && $2!="FRONTEND" {print $1" "$2" "$18}'
+  register: _hp_all
+  changed_when: false
+
+- name: Summarise
+  ansible.builtin.set_fact:
+    _be_down: "{{ _hp_all.stdout_lines | select('search', ' BACKEND ') | reject('search', ' UP$') | list }}"
+    _srv_maint: "{{ _hp_all.stdout_lines | reject('search', ' BACKEND ') | select('search', ' MAINT') | map('split', ' ') | map(attribute=1) | unique | list }}"
+    _srv_down: "{{ _hp_all.stdout_lines | reject('search', ' BACKEND ') | reject('search', ' (UP|MAINT|DRAIN)') | list }}"
+
+- name: Every backend has a healthy server
+  ansible.builtin.assert:
+    that: _be_down | length == 0
+    fail_msg: "Backends with no healthy server: {{ _be_down }}"
+
+- name: No server is DOWN (MAINT/DRAIN for maintenance is fine)
+  ansible.builtin.assert:
+    that: _srv_down | length == 0
+    fail_msg: "Servers failing health checks: {{ _srv_down }}"
+
+- name: Record
+  ansible.builtin.include_tasks: record.yml
+  vars:
+    r_check: HAProxy
+    r_status: "{{ 'WARN' if _srv_maint else 'PASS' }}"
+    r_detail: >-
+      {{ (_hp_all.stdout_lines | select('search', ' BACKEND ') | list | length) }} backends healthy{{
+      '; in maintenance: ' ~ _srv_maint | join(', ') if _srv_maint else '; all servers UP' }}

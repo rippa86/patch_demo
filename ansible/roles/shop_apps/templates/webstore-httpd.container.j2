@@ -1,0 +1,20 @@
+# Managed by Ansible (roles/shop_apps).
+[Unit]
+Description=webstore httpd frontend
+After=network-online.target
+
+[Container]
+Image=localhost/webstore-httpd:1.0
+ContainerName=webstore-httpd
+Network=webstore-net.network
+PublishPort=8080:8080
+{% if httpd_direct_api_proxy %}
+# Lets http://<this node>:8080/api/... work without going through HAProxy.
+Volume=/etc/webstore/api-proxy.conf:/etc/httpd/conf.d/api-proxy.conf:ro,Z
+{% endif %}
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
