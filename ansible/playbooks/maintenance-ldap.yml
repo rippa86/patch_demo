@@ -21,6 +21,7 @@
   become: true
   gather_facts: false
   vars:
+    ms_playbook: maintenance-ldap
     do_stop: "{{ ldap_stop | default(false) | bool }}"
     do_start: "{{ ldap_start | default(false) | bool }}"
     do_tvt: "{{ ldap_tvt | default(false) | bool }}"
@@ -147,6 +148,34 @@
               - "PASS - LDAP on {{ target_name }} is stopped; logins work on both nodes via {{ peer_name }}'s directory."
               - "Changes made meanwhile queue on {{ peer_name }} and replicate when {{ target_name }} starts (keep it under ~7 days)."
 
+        - name: Record ldap_stop for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: ldap
+            ms_action: ldap_stop
+            ms_result: PASS
+            ms_tvt:
+              peer_users: "{{ ls[peer].people }}"
+              fallback: "ldap://{{ hostvars[peer].node_ip }}:389"
+              direct_login_on_target: passed
+              login_via_haproxy: passed
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: ldap
+            ms_action: ldap_stop
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - ldap_stop failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
     # ------------------------------------------------------------------ ldap_start
     - name: Start LDAP on {{ target_name }}
       when: do_start
@@ -199,6 +228,33 @@
         - name: Started
           ansible.builtin.debug:
             msg: "PASS - LDAP on {{ target_name }} is up, caught up ({{ ls[target].people }} users) and replicating both ways."
+
+        - name: Record ldap_start for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: ldap
+            ms_action: ldap_start
+            ms_result: PASS
+            ms_tvt:
+              users: "{{ ls[target].people }}"
+              peer_users: "{{ ls[peer].people }}"
+              replication: "{{ 'verified both ways' if ls[peer].up else 'not tested (peer LDAP down)' }}"
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: ldap
+            ms_action: ldap_start
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - ldap_start failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
 
     # ------------------------------------------------------------------ ldap_tvt
     - name: LDAP TVT
@@ -262,3 +318,31 @@
               - "Directories up: {{ ldap_up_nodes | map('extract', hostvars, 'node_name') | join(', ') }} ({{ ls[ldap_up_nodes[0]].people }} users)"
               - "Replication:    {{ 'verified both ways' if ldap_up_nodes | length == 2 else 'not tested (only one directory up)' }}"
               - "Logins:         OK on both nodes' APIs and through HAProxy"
+
+        - name: Record ldap_tvt for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: ldap
+            ms_action: ldap_tvt
+            ms_result: PASS
+            ms_tvt:
+              directories_up: "{{ ldap_up_nodes | map('extract', hostvars, 'node_name') | list }}"
+              users: "{{ ls[ldap_up_nodes[0]].people }}"
+              replication: "{{ 'verified both ways' if ldap_up_nodes | length == 2 else 'not tested (one directory up)' }}"
+              logins: passed on both nodes and via HAProxy
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: ldap
+            ms_action: ldap_tvt
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - ldap_tvt failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"

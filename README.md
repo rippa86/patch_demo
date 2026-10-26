@@ -220,6 +220,39 @@ ansible-playbook playbooks/maintenance-ldap.yml -e lab_password='...' -e target=
 Changes made while one directory is down queue on the other and replay when it starts; keep
 outages well under the changelog retention (about 7 days by default).
 
+## AAP workflow: frontend maintenance
+
+The maintenance playbooks and `tvt.yml` publish their results with `set_stats`, so an AAP workflow
+passes them from node to node (and to notifications) as extra vars:
+
+| Artifact | Contents |
+| --- | --- |
+| `maint_haproxy`, `maint_db`, `maint_ldap` | one record per action, e.g. `maint_db.switch_primary` = `{result, node, tvt: {...}, error, finished_at, job_id}` |
+| `maint_last` | the most recent step's record (handy for notification templates) |
+| `maint_history` | every step in the workflow so far, in order (each job appends) |
+| `maint_target` | the node being worked on |
+| `tvt_report` | `{overall, sections, failed, warnings}` from `tvt.yml` |
+
+A failed step still publishes its record (`result: FAIL` and the reason) before the job fails, so
+the workflow's failure branch knows exactly what went wrong. Artifact names never match a playbook
+switch, so a downstream node can't accidentally inherit `ldap_stop: true` and act on it.
+
+Suggested layout (one job template per action with that action's switch fixed in its extra vars;
+the workflow survey asks for `target` once and every node inherits it):
+
+```
+TVT (pre-check)
+  └─ HAProxy: remove_haproxy
+       └─ DB: switch_primary + shutdown_db_service
+            └─ LDAP: ldap_stop
+                 └─ Approval: "maintenance finished?"
+                      └─ LDAP: ldap_start + ldap_tvt
+                           └─ DB: start_db_service + restore_traffic + database_tvt
+                                └─ HAProxy: restore_haproxy
+                                     └─ TVT (post-check)
+on failure of any node ──> notification (use maint_last / maint_history)
+```
+
 ## Drain one shop host
 
 Bleed connections off a node in HAProxy, then stop its services; the other node and garbd keep

@@ -22,6 +22,7 @@
   become: true
   gather_facts: false
   vars:
+    ms_playbook: maintenance-haproxy
     do_remove: "{{ remove_haproxy | default(false) | bool }}"
     do_restore: "{{ restore_haproxy | default(false) | bool }}"
     peer: "{{ groups['webstore_shop'] | difference([target]) | first }}"
@@ -144,6 +145,36 @@
               - "PASS - {{ target_name }} is {{ 'already ' if already_out else '' }}in MAINT in every backend; {{ peer_name }} is serving the shop."
               - "Its containers and database are still running. Put it back with -e restore_haproxy=true."
 
+        - name: Record remove_haproxy for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: haproxy
+            ms_action: remove_haproxy
+            ms_result: PASS
+            ms_tvt:
+              already_out: "{{ already_out }}"
+              open_connections_when_cut: "{{ _scur.stdout | default(0) | int }}"
+              forced: "{{ force_remove | default(false) | bool }}"
+              haproxy_target: "{{ hp[target_name] }}"
+              haproxy_peer: "{{ hp[peer_name] }}"
+              shop_check: passed
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: haproxy
+            ms_action: remove_haproxy
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - remove_haproxy failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
     # ------------------------------------------------------------------ restore_haproxy
     - name: Restore {{ target_name }} to HAProxy
       when: do_restore
@@ -202,3 +233,30 @@
             msg:
               - "PASS - {{ target_name }} is UP in every backend and sharing traffic with {{ peer_name }}."
               - "{{ target_name }}: {{ hp[target_name] }}"
+
+        - name: Record restore_haproxy for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: haproxy
+            ms_action: restore_haproxy
+            ms_result: PASS
+            ms_tvt:
+              health_checks_passed: "{{ _health.results | length }}"
+              haproxy_target: "{{ hp[target_name] }}"
+              shop_check: passed
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: haproxy
+            ms_action: restore_haproxy
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - restore_haproxy failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"

@@ -1,0 +1,41 @@
+---
+# Publish a maintenance step's outcome as AAP workflow artifacts (set_stats).
+# Downstream workflow nodes receive these as extra vars. Names are chosen so they
+# never collide with a playbook switch (remove_haproxy, ldap_stop, ...).
+#
+#   maint_<area>   e.g. maint_db: { switch_primary: {...}, shutdown_db_service: {...} }
+#   maint_last     the most recent step's record
+#   maint_history  every step so far in this workflow (appended by each job)
+#   maint_target   the node being worked on
+#
+# vars: ms_area (haproxy|db|ldap), ms_action, ms_result (PASS|FAIL), ms_tvt (dict), ms_error (optional)
+
+- name: Build the record
+  ansible.builtin.set_fact:
+    _ms_entry:
+      playbook: "{{ ms_playbook }}"
+      action: "{{ ms_action }}"
+      target: "{{ target }}"
+      node: "{{ hostvars[target].node_name }}"
+      result: "{{ ms_result }}"
+      error: "{{ ms_error | default('') }}"
+      tvt: "{{ ms_tvt | default({}) }}"
+      finished_at: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+      job_id: "{{ awx_job_id | default(tower_job_id | default('')) }}"
+
+- name: Merge with what earlier steps (this job or upstream workflow jobs) recorded
+  ansible.builtin.set_fact:
+    _ms_history: "{{ (_ms_history | default(maint_history | default([]))) + [_ms_entry] }}"
+    _ms_areas: >-
+      {{ (_ms_areas | default({})) | combine({
+           'maint_' ~ ms_area:
+             ((_ms_areas | default({}))['maint_' ~ ms_area]
+               | default(lookup('vars', 'maint_' ~ ms_area, default={})))
+             | combine({ms_action: _ms_entry})
+         }) }}
+
+- name: Publish workflow artifacts
+  ansible.builtin.set_stats:
+    data: "{{ _ms_areas | combine({'maint_last': _ms_entry, 'maint_history': _ms_history, 'maint_target': target}) }}"
+    per_host: false
+    aggregate: false

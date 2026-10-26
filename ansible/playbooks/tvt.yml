@@ -165,6 +165,31 @@
       ansible.builtin.debug:
         msg: "{{ ['TVT ' ~ tvt_overall ~ ' (' ~ tvt_results | length ~ ' sections)'] + tvt_lines }}"
 
+    - name: Publish the TVT report for AAP workflows (set_stats)
+      ansible.builtin.set_stats:
+        data:
+          tvt_report:
+            overall: "{{ tvt_overall }}"
+            sections: "{{ tvt_results }}"
+            failed: "{{ tvt_results | selectattr('status', 'equalto', 'FAIL') | map(attribute='check') | list }}"
+            warnings: "{{ tvt_results | selectattr('status', 'equalto', 'WARN') | map(attribute='check') | list }}"
+            finished_at: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+            job_id: "{{ awx_job_id | default(tower_job_id | default('')) }}"
+          maint_last:
+            playbook: tvt
+            action: tvt
+            result: "{{ tvt_overall }}"
+            tvt: "{{ dict(tvt_results | map(attribute='check') | zip(tvt_results | map(attribute='status'))) }}"
+            finished_at: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+            job_id: "{{ awx_job_id | default(tower_job_id | default('')) }}"
+          maint_history: >-
+            {{ maint_history | default([]) + [{'playbook': 'tvt', 'action': 'tvt', 'result': tvt_overall,
+                 'tvt': dict(tvt_results | map(attribute='check') | zip(tvt_results | map(attribute='status'))),
+                 'finished_at': now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                 'job_id': awx_job_id | default(tower_job_id | default(''))}] }}
+        per_host: false
+        aggregate: false
+
     - name: Overall result
       ansible.builtin.assert:
         that: tvt_results | selectattr('status', 'equalto', 'FAIL') | list | length == 0

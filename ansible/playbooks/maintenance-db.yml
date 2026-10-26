@@ -29,6 +29,7 @@
   become: true
   gather_facts: false
   vars:
+    ms_playbook: maintenance-db
     do_switch: "{{ switch_primary | default(false) | bool }}"
     do_shutdown: "{{ shutdown_db_service | default(false) | bool }}"
     do_start: "{{ start_db_service | default(false) | bool }}"
@@ -156,6 +157,35 @@
           ansible.builtin.debug:
             msg: "PASS - {{ peer_name }} is primary: it took {{ probe_delta[peer] }} write-sets, {{ target_name }} took 0 and is read-only + MAINT."
 
+        - name: Record switch_primary for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: switch_primary
+            ms_result: PASS
+            ms_tvt:
+              primary_now: "{{ peer_name }}"
+              writes_during_test: "{{ dict(probe_delta.keys() | map('extract', hostvars, 'node_name') | zip(probe_delta.values())) }}"
+              target_read_only: "{{ gs[target].read_only | default('n/a') }}"
+              haproxy_target: "{{ hp[target_name] }}"
+              haproxy_peer: "{{ hp[peer_name] }}"
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: switch_primary
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - switch_primary failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
     # ------------------------------------------------------------------ shutdown_db_service
     - name: Shut down MariaDB on {{ target_name }}
       when: do_shutdown
@@ -231,6 +261,33 @@
               - "{{ peer_name }} is Primary with {{ _size_before | int - 1 }} members ({{ peer_name }} + garbd)."
               - "{{ target_name }} grastate: {{ _grastate.stdout }}"
 
+        - name: Record shutdown_db_service for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: shutdown_db_service
+            ms_result: PASS
+            ms_tvt:
+              cluster_size_after: "{{ _size_before | int - 1 }}"
+              peer: "{{ peer_name }} Primary + Synced"
+              saved_position: "{{ _grastate.stdout }}"
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: shutdown_db_service
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - shutdown_db_service failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
     # ------------------------------------------------------------------ start_db_service
     - name: Start MariaDB on {{ target_name }} and resync
       when: do_start
@@ -268,6 +325,33 @@
             msg:
               - "PASS - {{ target_name }} is Synced (cluster size {{ gs[peer].wsrep_cluster_size }})."
               - "{{ 'It is still out of HAProxy; add -e restore_traffic=true to put it back.' if not do_restore else 'Returning it to service next.' }}"
+
+        - name: Record start_db_service for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: start_db_service
+            ms_result: PASS
+            ms_tvt:
+              target_state: "{{ gs[target].wsrep_local_state_comment }}"
+              cluster_size: "{{ gs[peer].wsrep_cluster_size }}"
+              health_checks: passed
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: start_db_service
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - start_db_service failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
 
     # ------------------------------------------------------------------ restore_traffic
     - name: Return {{ target_name }} to service
@@ -315,9 +399,66 @@
           ansible.builtin.debug:
             msg: "PASS - {{ target_name }} is writable and UP in every HAProxy backend."
 
+        - name: Record restore_traffic for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: restore_traffic
+            ms_result: PASS
+            ms_tvt:
+              read_only: "OFF"
+              haproxy_target: UP in every backend
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: restore_traffic
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - restore_traffic failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
     # ------------------------------------------------------------------ database_tvt
     - name: Site and database TVT
-      ansible.builtin.include_role:
-        name: db_maint
-        tasks_from: site_tvt
       when: do_tvt
+      block:
+        - name: Site and database TVT
+          ansible.builtin.include_role:
+            name: db_maint
+            tasks_from: site_tvt
+
+        - name: Record database_tvt for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: database_tvt
+            ms_result: PASS
+            ms_tvt:
+              db_nodes_up: "{{ db_nodes_up | map('extract', hostvars, 'node_name') | list }}"
+              serving_traffic: "{{ nodes_in_service | map('extract', hostvars, 'node_name') | list }}"
+              writes_during_test: "{{ dict(probe_delta.keys() | map('extract', hostvars, 'node_name') | zip(probe_delta.values())) }}"
+              cluster_size: "{{ gs[db_nodes_up[0]].wsrep_cluster_size }}"
+              checksums: "{{ dict(db_checksums.keys() | map('extract', hostvars, 'node_name') | zip(db_checksums.values())) }}"
+      rescue:
+        - name: Record the failure for the workflow
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: maint_stats
+          vars:
+            ms_area: db
+            ms_action: database_tvt
+            ms_result: FAIL
+            ms_error: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
+
+        - name: Stop - database_tvt failed
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_task.name | default('?') }}: {{ ansible_failed_result.msg | default('failed') }}"
