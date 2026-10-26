@@ -69,23 +69,21 @@
     fail_msg: "Write-sets per node during the probe: {{ probe_delta }} (in service: {{ nodes_in_service }})"
 
 - name: "TVT: data is identical on every running node"
-  block:
-    - name: Checksums
-      ansible.builtin.include_tasks: checksums.yml
-    - name: Compare
-      ansible.builtin.assert:
-        that: db_checksums.values() | unique | list | length == 1
-        fail_msg: "Checksums differ: {{ db_checksums }}"
-  rescue:
-    - name: A checkout may have landed between the two reads; look again
-      ansible.builtin.pause:
-        seconds: 5
-    - name: Checksums (retry)
-      ansible.builtin.include_tasks: checksums.yml
-    - name: Compare (retry)
-      ansible.builtin.assert:
-        that: db_checksums.values() | unique | list | length == 1
-        fail_msg: "Checksums differ between nodes: {{ db_checksums }}"
+  ansible.builtin.include_tasks: checksums.yml
+  when: db_nodes_up | length > 1
+
+- name: Only one DB node running - nothing to compare
+  ansible.builtin.set_fact:
+    db_check: single
+    db_check_note: only one DB node running, nothing to compare
+    db_checksums: {}
+  when: db_nodes_up | length < 2
+
+- name: "TVT: data comparison"
+  ansible.builtin.assert:
+    that: db_check != 'diverged'
+    fail_msg: "{{ db_check_note }}"
+    success_msg: "{{ db_check_note }}"
 
 - name: "TVT: admin can sign in and is recognised"
   ansible.builtin.uri:

@@ -12,4 +12,4 @@
     r_detail: >-
       Galera size {{ gs[db_nodes_up[0]].wsrep_cluster_size }}, Synced:
       {{ db_nodes_up | map('extract', hostvars, 'node_name') | join(', ') }}; writes
-      {% for n, d in probe_delta.items() %}{{ hostvars[n].node_name }}={{ d }} {% endfor %}; checksums match
+      {% for n, d in probe_delta.items() %}{{ hostvars[n].node_name }}={{ d }} {% endfor %}; {{ db_check_note }}

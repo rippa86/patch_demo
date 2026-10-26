@@ -448,6 +448,7 @@
               writes_during_test: "{{ dict(probe_delta.keys() | map('extract', hostvars, 'node_name') | zip(probe_delta.values())) }}"
               cluster_size: "{{ gs[db_nodes_up[0]].wsrep_cluster_size }}"
               checksums: "{{ dict(db_checksums.keys() | map('extract', hostvars, 'node_name') | zip(db_checksums.values())) }}"
+              data_check: "{{ db_check }}: {{ db_check_note }}"
       rescue:
         - name: Record the failure for the workflow
           ansible.builtin.include_role:

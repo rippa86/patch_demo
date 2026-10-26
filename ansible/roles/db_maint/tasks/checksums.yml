@@ -1,16 +1,44 @@
 ---
-# db_checksums = {node: "products,admins"} for every running DB node
-- name: Table checksums
-  ansible.builtin.shell: |
-    podman exec webstore-mariadb mariadb -uroot -p"$PW" -Nse \
-      "CHECKSUM TABLE webstore.products, webstore.admins" 2>/dev/null | awk '{print $2}' | paste -sd,
-  environment:
-    PW: "{{ lab_password }}"
-  delegate_to: "{{ item }}"
-  loop: "{{ db_nodes_up }}"
-  register: _sums
-  changed_when: false
-
-- name: Record
+# Compare the data on every running DB node, without false alarms while the shop is busy.
+#
+# Each node reports, in one consistent snapshot, its Galera position (wsrep_last_committed)
+# before and after reading, plus content hashes of:
+#   catalog  products without stock (id, sku, name, description, price)
+#   stock    products.stock (changes on every checkout)
+#   admins   the admins table
+# Nodes are read at the same moment (async). Data is only compared when every node was at
+# the SAME cluster position and nothing committed during its read: then any difference is
+# real divergence, not timing. Up to ck_rounds attempts (default 6).
+#
+# Results:
+#   db_check       match     identical at the same position
+#                  diverged  different at the same position (real problem)
+#                  busy      never caught all nodes at the same position (writes kept landing);
+#                            catalog and admins still compared, stock is not
+#   db_check_note  one-line explanation for reports
+#   db_checksums   {node: "catalog,stock,admins"} from the last attempt
+- name: Reset
   ansible.builtin.set_fact:
-    db_checksums: "{{ dict(db_nodes_up | zip(_sums.results | map(attribute='stdout'))) }}"
+    db_check: ""
+    _ck_writes: 0
+
+- name: Compare data across nodes
+  ansible.builtin.include_tasks: checksum_round.yml
+  loop: "{{ range(1, (ck_rounds | default(6) | int) + 1) | list }}"
+  loop_control:
+    loop_var: ck_round
+  when: db_check == ''
+
+- name: Never caught the nodes at the same position - compare what doesn't change on checkout
+  ansible.builtin.set_fact:
+    db_check: "{{ 'busy' if _same_static | bool else 'diverged' }}"
+    db_check_note: >-
+      {{ ('catalog and admins match; stock not compared (shop busy: ' ~ _ck_writes ~ ' writes landed during '
+          ~ (ck_rounds | default(6)) ~ ' attempts)') if _same_static | bool
+         else 'catalog/admins differ between nodes while the shop is busy (catalog,stock,admins): ' ~ db_checksums }}
+  vars:
+    _same_static: >-
+      {{ 'unreadable' not in db_checksums.values() and
+         db_checksums.values() | map('split', ',') | map('first') | unique | list | length == 1 and
+         db_checksums.values() | map('split', ',') | map('last') | unique | list | length == 1 }}
+  when: db_check == ''
